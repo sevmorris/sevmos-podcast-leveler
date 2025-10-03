@@ -45,15 +45,15 @@ brew install ffmpeg
 1. Clone this repo and make the script executable:
 
    ```bash
-   git clone https://github.com/YOURUSERNAME/podcast-leveler.git
+   git clone https://github.com/sevmorris/podcast-leveler.git
    cd podcast-leveler
-   chmod +x SevmoPodcastLeveler.sh
+   chmod +x SevmosPodcastLeveler.sh
    ```
 
 2. Run with one or more audio files:
 
    ```bash
-   ./SevmoPodcastLeveler.sh track1.wav track2.wav
+   ./SevmosPodcastLeveler.sh track1.wav track2.wav
    ```
 
 3. Follow the on-screen dialogs to choose:
