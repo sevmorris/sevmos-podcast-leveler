@@ -88,5 +88,4 @@ MIT License — feel free to adapt for your own workflows.
 ---
 
 ## 🙌 Credits
-Created by **Seven Morris (Sev)**  with help from **ChatGPT**. 
-for efficient podcast post-production on macOS.
+Created by **Seven Morris (Sev)**  with help from **ChatGPT**.
