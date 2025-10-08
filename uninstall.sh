@@ -1,20 +1,15 @@
 #!/bin/sh
-# Remove the global waxon command.
+# Remove the global 'waxon' command.
 
 set -eu
 
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
 resolve_bin_prefix() {
-  if command -v brew >/dev/null 2>&1; then
-    brew --prefix | awk '{print $0"/bin"}'
-    return
-  fi
-  if [ -d "/usr/local/bin" ]; then
-    printf "%s" "/usr/local/bin"
-  elif [ -d "/opt/homebrew/bin" ]; then
-    printf "%s" "/opt/homebrew/bin"
-  else
-    printf "%s" "$HOME/.local/bin"
-  fi
+  if has_cmd brew; then brew --prefix | awk '{print $0"/bin"}'; return; fi
+  if [ -d "/usr/local/bin" ]; then printf "%s" "/usr/local/bin"; return; fi
+  if [ -d "/opt/homebrew/bin" ]; then printf "%s" "/opt/homebrew/bin"; return; fi
+  printf "%s" "$HOME/.local/bin"
 }
 
 BIN_PREFIX="$(resolve_bin_prefix)"
