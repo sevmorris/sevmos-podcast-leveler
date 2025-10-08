@@ -62,12 +62,6 @@ To update later:
 cd ~/.local/share/waxon && git pull
 ```
 
-To uninstall:
-```bash
-sudo rm -f /usr/local/bin/waxon
-rm -rf ~/.local/share/waxon
-```
-
 ---
 
 ## Usage
@@ -87,17 +81,33 @@ example.wav     → example-44kwaxon--1dB.wav
 
 ---
 
-## Output summary
+## Uninstall
 
-| Stage | Description |
-|--------|-------------|
-| **Input** | Any PCM, MP3, AAC, AIF, etc. |
-| **DC block** | Removes low-frequency offset and sub-20 Hz rumble |
-| **Auto declip** | Detects clipped samples and repairs if needed |
-| **Leveling** | Normalizes to −25 LUFS (two-pass when possible) |
-| **Limiter** | Brick-wall peak limiter with adjustable ceiling |
-| **Dither** | TPDF high-pass (only on down-conversion) |
-| **Output** | 24-bit mono WAV, named with sample rate and limit tag |
+To completely remove WaxOn, use the included `uninstall.sh` script.  
+It detects whether you installed via **Minimal** or **Developer** mode and removes the correct files.
+
+### 🧹 Minimal uninstall
+```bash
+sudo rm -f "$(which waxon)"
+rm -f ~/Library/Logs/waxon_*.log
+```
+
+### 🧩 Developer uninstall
+```bash
+sudo rm -f "$(which waxon)"
+rm -rf ~/.local/share/waxon
+```
+
+Or use the included uninstaller for full automatic cleanup:
+```bash
+./uninstall.sh --yes --purge
+```
+
+Options:
+- `--yes` – non-interactive (no confirmation prompts)
+- `--purge` – also deletes logs in `~/Library/Logs/`
+- `--dry-run` – show what would be deleted without removing anything
+- `--verbose` – show additional diagnostic output
 
 ---
 
