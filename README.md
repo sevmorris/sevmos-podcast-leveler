@@ -1,33 +1,37 @@
-# WaxOn — Interactive CLI (DAW-ready)
+# WaxOn — Interactive CLI (DAW-ready, fixed −25 LUFS, WAV only)
 
-**WaxOn** is the **first, intermediate step** in your editing pipeline. It prepares **mono** program audio (channel 0) for DAW work by applying a DC block, optional declipping, loudness normalization, and a brickwall limiter with true-peak oversampling — all with safe, atomic writes. It’s interactive by default and mirrors WaxOff’s UX.
+**WaxOn** is the **first, intermediate step** in your pipeline. It prepares **mono** program audio (channel 0) for DAW work by applying a **DC block**, optional **declipping**, **two-pass loudness normalization to −25 LUFS**, and a final **brickwall limiter** — with **true-peak oversampling** and optional **HP dither**. Outputs are **24-bit WAV mono** at **44.1k or 48k** with safe, atomic writes.
 
-> Looking for the **final delivery** step? Use **WaxOff** → https://github.com/sevmorris/WaxOff
-
-- **Loudness target** (two-pass): default **−25 LUFS** (option for −23 LUFS)
-- **Limiter ceiling**: default **−1.0 dBFS** (adjustable −1..−6 dB)
-- **True-peak** oversampling (default on, ×4) and **HP dither**
-- **Outputs**: **WAV 24-bit mono** (44.1k/48k), optional **FLAC**
-- Atomic hidden-temp writes; succinct per-file loudness summary
-- Installs to **`~/bin`** (fallback **`~/.local/bin`**) — same location as **WaxOff**
+> Final delivery step? Use **WaxOff** → https://github.com/sevmorris/WaxOff
 
 ---
 
-## Install
+## Key points
 
-**Prereq:** `ffmpeg` in your PATH (macOS: `brew install ffmpeg`).
+- **Loudness**: fixed at **−25 LUFS** (two-pass `loudnorm`)
+- **Format**: **WAV 24-bit mono** only (no FLAC/MP3 here)
+- **Limiter ceiling**: selectable −1..−6 dBFS (default −1.0)
+- **True-peak** oversampling (default on, ×4) and **HP dither**
+- **DC block** first in chain; optional **declipping** (auto/on/off)
+- **Atomic** hidden temp writes → visible file on success
 
-**One-liner (general install):**
+---
+
+## Install (general)
+
+Prereq: `ffmpeg` in your PATH (macOS: `brew install ffmpeg`).
+
 ```bash
 bash -c 'd=$(mktemp -d); git clone --depth=1 https://github.com/sevmorris/WaxOn "$d" && (cd "$d" && chmod +x waxon install.sh && ./install.sh) && rm -rf "$d"'
 ```
 
-**One-liner (dev symlink install):**
+## Install (dev symlink)
+
 ```bash
 bash -c 'd="$HOME/src/WaxOn"; [ -d "$d/.git" ] || git clone https://github.com/sevmorris/WaxOn "$d"; (cd "$d" && git pull --ff-only && chmod +x waxon install.sh && ./install.sh --dev)'
 ```
 
-> The dev one-liner clones (or updates) to `~/src/WaxOn` and symlinks `waxon` into your user bin dir so edits take effect immediately.
+> Dev mode symlinks the `waxon` script so edits take effect immediately.
 
 ---
 
@@ -36,19 +40,20 @@ bash -c 'd="$HOME/src/WaxOn"; [ -d "$d/.git" ] || git clone https://github.com/s
 ```bash
 waxon *.wav
 # Prompts for:
-#   • Target LUFS (−25 / −23)
-#   • Output mode (wav | flac | both)
-#   • FLAC compression level (if flac is included)
 #   • Sample rate (44100 or 48000)
 #   • Limiter ceiling (−1..−6 dBFS)
 #   • Clip repair (auto / on / off)
+
+# Notes:
+#   • Loudness is fixed at −25 LUFS (two-pass loudnorm)
+#   • Output format is fixed to 24-bit mono WAV
 ```
 
 ### Example
 
 ```bash
 waxon ~/Audio_Raw/host_track.wav
-# → Outputs host_track-44k24_waxon-1dB.wav to the same directory
+# → Outputs: host_track-waxon-44k-1dB.wav (or 48k if chosen)
 ```
 
 ---
@@ -56,29 +61,23 @@ waxon ~/Audio_Raw/host_track.wav
 ## Non-interactive usage (flags / env)
 
 ```bash
-waxon --no-prompt -i -25 -L -1.0 -s 48000 -m both --clip-repair auto *.aif
+waxon --no-prompt -L -1.0 -s 48000 --clip-repair auto input.wav
 # or
-PROMPT=0 LUFS_TARGET=-23 OUTMODE=wav SAMPLE_RATE=44100 waxon *.wav
+PROMPT=0 SAMPLE_RATE=44100 LIMIT_DB=-1.0 waxon input.wav
 ```
 
-### Common options
+### Common flags
 
 ```
-  -i, --lufs <I>           Target integrated LUFS (default: -25)
-  -L, --limit-db <dB>      Limiter ceiling in dBFS (default: -1.0)
+  -L, --limit-db <dB>      Limiter ceiling (default: -1.0)
   -s, --samplerate <hz>    44100 or 48000
-  -m, --mode <mode>        wav | flac | both (default: wav)
-  --flac-level <N>         0..12 compression (default: 8)
-
-  --truepeak <0|1>         Enable true-peak oversampling (default: 1)
+  --truepeak <0|1>         True-peak oversampling (default: 1)
   --tp-oversample <N>      Oversample factor (default: 4)
   --dither <0|1>           Triangular HP dither (default: 1)
-
   --clip-repair <mode>     auto | 1 | 0   (default: auto)
-  --clip-threshold <N>     Minimum clipped-sample count to trigger (default: 1)
-  --dc-block <Hz>          DC blocker high-pass frequency (default: 20)
-
-  -l, --log <path>         Log file path (default: ~/Library/Logs/waxon_cli.log)
+  --clip-threshold <N>     Trigger threshold for auto (default: 1)
+  --dc-block <Hz>          DC blocker high-pass (default: 20)
+  -l, --log <path>         Log path (default: ~/Library/Logs/waxon_cli.log)
   --no-prompt              Skip interactive questions
   -q, --quiet              Reduce console output
   -n, --dry-run            Show actions without writing files
@@ -86,25 +85,27 @@ PROMPT=0 LUFS_TARGET=-23 OUTMODE=wav SAMPLE_RATE=44100 waxon *.wav
 
 ---
 
-## Updating
+## Workflow
 
-To pull the latest version (dev install only):
+1) **WaxOn** → create clean, consistent mono WAVs ready for editing.  
+2) **Edit / mix** in your DAW.  
+3) **WaxOff** → final loudness (−18/−16 LUFS) + deliverables (WAV/MP3/FLAC).
+
+---
+
+## Update
+
+Dev install:
+
 ```bash
 cd ~/src/WaxOn && git pull && ./install.sh --dev
 ```
 
-To reinstall the general version:
+General reinstall:
+
 ```bash
 bash -c 'd=$(mktemp -d); git clone --depth=1 https://github.com/sevmorris/WaxOn "$d" && (cd "$d" && ./install.sh) && rm -rf "$d"'
 ```
-
----
-
-## Recommended workflow
-
-1) **WaxOn** on raw takes → clean, consistent mono WAV/FLAC.  
-2) **Edit / mix** in your DAW.  
-3) **WaxOff** for final loudness (−18/−16 LUFS) and deliverables (WAV/MP3/FLAC). → https://github.com/sevmorris/WaxOff
 
 ---
 
