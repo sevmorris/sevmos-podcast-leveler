@@ -92,7 +92,9 @@ extract_json_num() { local f="$1" key="$2"; LC_ALL=C sed -nE "s/.*\"${key}\"[[:s
 spotcheck_file() { # INFILE OUT_TXT
   local F="$1" OUT="$2" J
   J="$(mktemp -t waxon_sc.XXXXXX.json 2>/dev/null || echo "/tmp/waxon_sc.$RANDOM.json")"
-  "$FFMPEG" -hide_banner -nostats -y -i "$F"         -af "loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:print_format=json"         -f null - 2> "$J"
+  "$FFMPEG" -hide_banner -nostats -y -i "$F" \
+    -af "loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:print_format=json" \
+    -f null - 2> "$J"
   if [[ $? -ne 0 ]]; then
     echo "I=n/a TP=n/a" > "$OUT"
   else
@@ -105,7 +107,9 @@ spotcheck_file() { # INFILE OUT_TXT
 
 detect_clipped_samples() { # returns integer clipped count
   local in_file="$1"
-  "$FFMPEG" -nostdin -hide_banner -v error -i "$in_file"         -af "astats=metadata=1:reset=0" -f null - 2>&1       | awk '
+  "$FFMPEG" -nostdin -hide_banner -v error -i "$in_file" \
+    -af "astats=metadata=1:reset=0" -f null - 2>&1 \
+  | awk '
     BEGIN{sum=0}
     /clipped[[:space:]]+samples/i {
       for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+$/) sum += $i
@@ -142,7 +146,8 @@ progress_draw() {  # $1=label  $2=pct (0..100)
 ffprobe_duration_s() { # $1=input_file -> prints seconds (float) or 0
   command -v ffprobe >/dev/null 2>&1 || { echo 0; return; }
   local dur
-  dur="$(ffprobe -v error -show_entries format=duration              -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | head -n1)"
+  dur="$(ffprobe -v error -show_entries format=duration \
+        -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | head -n1)"
   [ -n "$dur" ] && echo "$dur" || echo 0
 }
 
@@ -169,7 +174,8 @@ ffmpeg_with_progress() {
     progress_draw "$label" 100; printf "\n" >"$TTY_OUT"
   ) &
   local reader_pid=$!
-  "$FFMPEG" -nostdin -hide_banner -loglevel error -stats_period 0.5         -progress "$pipe" "$@" 2>/dev/null
+  "$FFMPEG" -nostdin -hide_banner -loglevel error -stats_period 0.5 \
+    -progress "$pipe" "$@" 2>/dev/null
   local rc=$?
   kill "$reader_pid" >/dev/null 2>&1 || true
   rm -f "$pipe"
@@ -296,7 +302,10 @@ for IN in "${args[@]}"; do
 
   MID="$(mktemp -t waxon_mid.XXXXXX 2>/dev/null || echo "/tmp/waxon_mid.$RANDOM")"; MID="${MID}.wav"; TEMP_FILES+=("$MID")
   DUR_PREP="$(ffprobe_duration_s "$IN")"
-  if ! ffmpeg_with_progress "$DUR_PREP" "prep"             -y -i "$IN" -af "$step1_af"             -c:a pcm_s24le -ar ${SAMPLE_RATE} -ac 1             -f wav "$MID"
+  if ! ffmpeg_with_progress "$DUR_PREP" "prep" \
+       -y -i "$IN" -af "$step1_af" \
+       -c:a pcm_s24le -ar ${SAMPLE_RATE} -ac 1 \
+       -f wav "$MID"
   then
     echo "!! Step 1 failed for: $BASE (clip=${file_clipped})"
     FAILED=$((FAILED+1))
@@ -305,7 +314,9 @@ for IN in "${args[@]}"; do
 
   # Step 2a: measure for two-pass loudnorm (TP=0 so limiter is the only ceiling)
   PASS1="$(mktemp -t waxon_p1.XXXXXX.json 2>/dev/null || echo "/tmp/waxon_p1.$RANDOM.json")"; TEMP_FILES+=("$PASS1")
-  "$FFMPEG" -nostdin -hide_banner -v error -i "$MID"         -af "loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:print_format=json"         -f null - 2>"$PASS1"
+  "$FFMPEG" -nostdin -hide_banner -v error -i "$MID" \
+    -af "loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:print_format=json" \
+    -f null - 2>"$PASS1"
   P1_RC=$?
 
   MEAS_I="$(extract_json_num "$PASS1" input_i)"
@@ -344,7 +355,10 @@ for IN in "${args[@]}"; do
   PASS2_LOG="$(mktemp -t waxon_p2.XXXXXX.log 2>/dev/null || echo "/tmp/waxon_p2.$RANDOM.log")"; TEMP_FILES+=("$PASS2_LOG")
   DUR_RENDER="$(ffprobe_duration_s "$MID")"; [ "$DUR_RENDER" = "0" ] && DUR_RENDER="$DUR_PREP"
 
-  if ffmpeg_with_progress "$DUR_RENDER" "render"            -y -i "$MID" -af "$af"            -c:a pcm_s24le -ar ${SAMPLE_RATE} -ac 1            -f wav "$TMP_WAV"
+  if ffmpeg_with_progress "$DUR_RENDER" "render" \
+       -y -i "$MID" -af "$af" \
+       -c:a pcm_s24le -ar ${SAMPLE_RATE} -ac 1 \
+       -f wav "$TMP_WAV"
   then
     if [[ ! -s "$TMP_WAV" ]]; then
       echo "!! Render produced no data: $TMP_WAV"

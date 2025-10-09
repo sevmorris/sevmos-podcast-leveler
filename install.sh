@@ -1,80 +1,46 @@
 #!/usr/bin/env bash
+# WaxOn per-repo installer: clone to ~/WaxOn and symlink 'waxon'
 set -euo pipefail
+IFS=$'\n\t'
 
-APP="waxon"
-SRC="./${APP}"
+REPO_URL="https://github.com/sevmorris/WaxOn.git"
+REPO_NAME="WaxOn"
+EXE_NAME="waxon"
 
-PREFIX="${PREFIX:-$HOME/bin}"   # default user-local
-MODE="copy"                     # copy | dev
-UNINSTALL=0
+choose_bin_dir() {
+  if [[ -d "${HOME}/bin" ]]; then echo "${HOME}/bin"
+  elif [[ -d "${HOME}/.local/bin" ]]; then echo "${HOME}/.local/bin"
+  else mkdir -p "${HOME}/bin"; echo "${HOME}/bin"; fi
+}
+BIN_DIR="$(choose_bin_dir)"
 
-usage() {
-  cat <<EOF
-${APP} installer
+case ":${PATH}:" in *:"${BIN_DIR}":*) ;; *)
+  echo "⚠️  ${BIN_DIR} not in PATH. Add: export PATH=\"${BIN_DIR}:\$PATH\"";;
+esac
 
-Usage: ./install.sh [--prefix DIR] [--dev] [--uninstall]
+DEST="${HOME}/${REPO_NAME}"
+if [[ -d "${DEST}/.git" ]]; then
+  echo "→ Updating ${REPO_NAME} in ${DEST}"
+  git -C "${DEST}" fetch --quiet --all
+  git -C "${DEST}" pull --quiet --rebase || git -C "${DEST}" pull --quiet
+else
+  echo "→ Cloning ${REPO_NAME} to ${DEST}"
+  git clone --depth=1 "${REPO_URL}" "${DEST}"
+fi
 
-Options:
-  --prefix DIR   Install prefix (default: ~/bin; fallback ~/.local/bin)
-  --dev          Symlink from repo (development mode)
-  --uninstall    Remove installed binary (from prefix)
-  -h, --help     Show this help
-
-Environment:
-  PREFIX         Same as --prefix (overrides default)
-EOF
+find_exec() {
+  local d="$1" n="$2"
+  for p in "${d}/${n}" "${d}/${n}.sh" "${d}/scripts/${n}" "${d}/scripts/${n}.sh" "${d}/bin/${n}" "${d}/bin/${n}.sh"; do
+    [[ -f "$p" ]] && { echo "$p"; return 0; }
+  done
+  return 1
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --prefix)   PREFIX="$2"; shift 2 ;;
-    --dev)      MODE="dev"; shift ;;
-    --uninstall) UNINSTALL=1; shift ;;
-    -h|--help)  usage; exit 0 ;;
-    *) echo "Unknown option: $1" >&2; usage; exit 2 ;;
-  esac
-done
-
-if [[ "${PREFIX}" == "$HOME/bin" && ! -d "$HOME/bin" ]]; then
-  PREFIX="$HOME/.local/bin"
-fi
-
-TARGET="${PREFIX}/${APP}"
-mkdir -p "${PREFIX}"
-
-if [[ $UNINSTALL -eq 1 ]]; then
-  if [[ -e "$TARGET" ]]; then
-    rm -f "$TARGET"
-    echo "Removed $TARGET"
-  else
-    echo "No ${APP} found at $TARGET"
-  fi
-  exit 0
-fi
-
-if [[ ! -f "$SRC" ]]; then
-  echo "Cannot find ${SRC}. Run this from the repo root." >&2
+SRC="$(find_exec "${DEST}" "${EXE_NAME}")" || {
+  echo "❌ Could not find ${EXE_NAME}{,.sh} in repo root/scripts/bin."
   exit 1
-fi
+}
 
-if [[ "$MODE" == "dev" ]]; then
-  ln -sfn "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")" "$TARGET"
-  echo "Symlinked (dev): $TARGET -> $SRC"
-else
-  install -m 0755 "$SRC" "$TARGET"
-  echo "Installed: $TARGET"
-fi
-
-SHELLRC="${HOME}/.zshrc"
-LINE='export PATH="$HOME/bin:$HOME/.local/bin:$PATH"'
-if [[ -f "$SHELLRC" ]]; then
-  if ! grep -qs "$LINE" "$SHELLRC"; then
-    echo "$LINE" >> "$SHELLRC"
-    echo "Appended PATH update to ${SHELLRC}. Run: source ${SHELLRC}"
-  fi
-else
-  echo "$LINE" >> "$SHELLRC"
-  echo "Created ${SHELLRC} with PATH update. Run: source ${SHELLRC}"
-fi
-
-echo "Done."
+chmod +x "${SRC}"
+ln -sfn "${SRC}" "${BIN_DIR}/${EXE_NAME}"
+echo "✅ Installed: ${EXE_NAME} -> ${SRC}"
