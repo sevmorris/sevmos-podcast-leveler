@@ -37,8 +37,8 @@ TP_OVERSAMPLE="${TP_OVERSAMPLE:-4}"
 DITHER="${DITHER:-1}"          # final-stage triangular HP
 
 # Clip repair
-CLIP_REPAIR="${CLIP_REPAIR:-auto}"   # auto|1|0 (1=force on, 0=off)
-CLIP_THRESHOLD="${CLIP_THRESHOLD:-1}"# min clipped-sample count to trigger
+CLIP_REPAIR="${CLIP_REPAIR:-auto}"      # auto|1|0 (1=force on, 0=off)
+CLIP_THRESHOLD="${CLIP_THRESHOLD:-1}"   # min clipped-sample count to trigger
 
 # DC blocker (first in chain)
 DC_BLOCK_HZ="${DC_BLOCK_HZ:-20}"
@@ -52,6 +52,20 @@ LOG_FILE="${LOG_FILE:-${HOME}/Library/Logs/waxon_cli.log}"
 # Tools
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 FFMPEG="${FFMPEG:-$(command -v /opt/homebrew/bin/ffmpeg || command -v ffmpeg || true)}"
+
+# ---------------- Robust binds for set -u (ensure all are defined) ------------
+: "${PROMPT:=1}"
+: "${LIMIT_DB:=-1.0}"
+: "${ATTACK_MS:=5}"
+: "${RELEASE_MS:=50}"
+: "${TRUEPEAK:=1}"
+: "${TP_OVERSAMPLE:=4}"
+: "${DITHER:=1}"
+: "${CLIP_REPAIR:=auto}"
+: "${CLIP_THRESHOLD:=1}"
+: "${DC_BLOCK_HZ:=20}"
+: "${SAMPLE_RATE:=44100}"
+: "${LOG_FILE:=${HOME}/Library/Logs/waxon_cli.log}"
 
 # --------------------------- Usage / argument parsing -------------------------
 usage() { cat <<EOF
@@ -184,7 +198,7 @@ confirm() {
   echo "  Mode:        wav (24-bit mono)"
   echo "  Sample rate: ${SAMPLE_RATE} Hz"
   echo "  True-peak:   ${TRUEPEAK} (×${TP_OVERSAMPLE})  Dither: ${DITHER}"
-  echo "  Clip repair: ${CLIP_REPAIR} (threshold ${CLIP_THRESHOLD})"
+  echo "  Clip repair: ${CLIP_REPAIR} (threshold ${CLIP_THRESHOLD:-1})"
   echo "  DC block:    ${DC_BLOCK_HZ} Hz"
   read -r -p "Proceed? [Y/n]: " yn; case "${yn:-Y}" in Y|y) : ;; *) echo "Cancelled."; exit 0 ;; esac
 }
