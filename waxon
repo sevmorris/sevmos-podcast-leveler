@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # WaxOn — Interactive CLI: consistent, safe, and DAW-ready audio
-# VERSION v1.2 (WaxOn fixed at −25 LUFS, WAV only)
+# VERSION v1.3 (−25 LUFS, WAV-only)  — with progress and macOS file picker
 
 set -u
 set +e
 IFS=$'\n\t'
 
-VERSION="${VERSION:-v1.2}"
+VERSION="${VERSION:-v1.3}"
 APP_TITLE="WaxOn ${VERSION} — DAW-ready Audio (Interactive)"
 
 # ---------------- Defaults ----------------
@@ -92,9 +92,7 @@ extract_json_num() { local f="$1" key="$2"; LC_ALL=C sed -nE "s/.*\"${key}\"[[:s
 spotcheck_file() { # INFILE OUT_TXT
   local F="$1" OUT="$2" J
   J="$(mktemp -t waxon_sc.XXXXXX.json 2>/dev/null || echo "/tmp/waxon_sc.$RANDOM.json")"
-  "$FFMPEG" -hide_banner -nostats -y -i "$F" \
-    -af "loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:print_format=json" \
-    -f null - 2> "$J"
+  "$FFMPEG" -hide_banner -nostats -y -i "$F"     -af "loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:print_format=json"     -f null - 2> "$J"
   if [[ $? -ne 0 ]]; then
     echo "I=n/a TP=n/a" > "$OUT"
   else
@@ -107,9 +105,7 @@ spotcheck_file() { # INFILE OUT_TXT
 
 detect_clipped_samples() { # returns integer clipped count
   local in_file="$1"
-  "$FFMPEG" -nostdin -hide_banner -v error -i "$in_file" \
-    -af "astats=metadata=1:reset=0" -f null - 2>&1 \
-  | awk '
+  "$FFMPEG" -nostdin -hide_banner -v error -i "$in_file"     -af "astats=metadata=1:reset=0" -f null - 2>&1   | awk '
     BEGIN{sum=0}
     /clipped[[:space:]]+samples/i {
       for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+$/) sum += $i
@@ -117,7 +113,7 @@ detect_clipped_samples() { # returns integer clipped count
     END{ if (sum=="") sum=0; print sum }'
 }
 
-# macOS file picker when no args and PROMPT=1
+# ---- macOS file picker when no args and PROMPT=1 ----
 pick_files_macos() {
   /usr/bin/osascript <<'OSA' 2>/dev/null
 set fp to choose file with prompt "Select one or more audio files for WaxOn:" with multiple selections allowed
@@ -129,7 +125,68 @@ return out
 OSA
 }
 
-# ---------------- Prompts ----------------
+# ---- Progress helpers ----
+TTY_OUT="/dev/tty"; [ -w "$TTY_OUT" ] || TTY_OUT="/dev/null"
+
+progress_draw() {  # $1=label  $2=pct (0..100)
+  local label="$1" pct="$2" width=28 fill pad
+  (( pct < 0 )) && pct=0; (( pct > 100 )) && pct=100
+  fill=$(( (pct*width)/100 ))
+  pad=$(( width - fill ))
+  printf "\r%-12s [" "$label" >"$TTY_OUT"
+  printf "%${fill}s" "" | tr ' ' '#' >"$TTY_OUT"
+  printf "%${pad}s" ""  >"$TTY_OUT"
+  printf "] %3d%%" "$pct" >"$TTY_OUT"
+}
+
+ffprobe_duration_s() { # $1=input_file -> prints seconds (float) or 0
+  command -v ffprobe >/dev/null 2>&1 || { echo 0; return; }
+  local dur
+  dur="$(ffprobe -v error -show_entries format=duration          -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | head -n1)"
+  [ -n "$dur" ] && echo "$dur" || echo 0
+}
+
+ffmpeg_with_progress() {
+  # $1=duration_seconds (float), $2=label, remaining args = ffmpeg args
+  local dur_s="$1" label="$2"; shift 2
+  local pipe; pipe="$(mktemp -u)"; mkfifo "$pipe"
+  (
+    local total_us cur_us pct k v
+    total_us=$(awk -v d="$dur_s" 'BEGIN{printf "%.0f", d*1000000}')
+    [ -z "$total_us" ] && total_us=1
+    while IFS='=' read -r k v; do
+      case "$k" in
+        out_time_us) cur_us="${v%.*}";;
+        out_time_ms) cur_us=$(( ${v%.*} * 1000 ));;
+        progress) [ "$v" = "end" ] && break; continue;;
+        *) continue;;
+      esac
+      [ -z "$cur_us" ] && cur_us=0
+      pct=$(( cur_us * 100 / (total_us>0?total_us:1) ))
+      (( pct>100 )) && pct=100
+      progress_draw "$label" "$pct"
+    done <"$pipe"
+    progress_draw "$label" 100; printf "\n" >"$TTY_OUT"
+  ) &
+  local reader_pid=$!
+  "$FFMPEG" -nostdin -hide_banner -loglevel error -stats_period 0.5     -progress "$pipe" "$@" 2>/dev/null
+  local rc=$?
+  kill "$reader_pid" >/dev/null 2>&1 || true
+  rm -f "$pipe"
+  return $rc
+}
+
+# Offer picker if no args
+if [[ ${#args[@]} -lt 1 && "${PROMPT}" == "1" ]]; then
+  picks="$(pick_files_macos || true)"
+  if [[ -n "${picks:-}" ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && args+=("$line")
+    done <<< "$picks"
+  fi
+fi
+
+# Validation & prompts
 prompt_sr() {
   echo "Sample rate:"
   echo "  1) 44100 Hz (default)"
@@ -173,17 +230,6 @@ confirm() {
   read -r -p "Proceed? [Y/n]: " yn; case "${yn:-Y}" in Y|y) : ;; *) echo "Cancelled."; exit 0 ;; esac
 }
 
-# Offer picker if no args
-if [[ ${#args[@]} -lt 1 && "${PROMPT}" == "1" ]]; then
-  picks="$(pick_files_macos || true)"
-  if [[ -n "${picks:-}" ]]; then
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && args+=("$line")
-    done <<< "$picks"
-  fi
-fi
-
-# Validation
 if [[ "${PROMPT}" == "1" ]]; then
   prompt_sr; prompt_limit; prompt_clip; confirm
 fi
@@ -198,7 +244,7 @@ if [[ -z "${FFMPEG:-}" || ! -x "$FFMPEG" ]]; then
   exit 2
 fi
 
-# Logging (tee)
+# Logging (tee to console + file)
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -248,15 +294,9 @@ for IN in "${args[@]}"; do
   [[ "$apply_declip" == "1" ]] && step1_af="${step1_af},adeclip"
   step1_af="${step1_af},highpass=f=20,pan=1c|c0=c0,aresample=${SAMPLE_RATE}:resampler=soxr"
 
-  # FIX: create a real .wav path and force -f wav so FFmpeg knows the muxer
-  MID="$(mktemp -t waxon_mid.XXXXXX 2>/dev/null || echo "/tmp/waxon_mid.$RANDOM")"
-  MID="${MID}.wav"
-  TEMP_FILES+=("$MID")
-
-  if ! "$FFMPEG" -nostdin -hide_banner -loglevel error -y \
-        -i "$IN" -af "$step1_af" \
-        -c:a pcm_s24le -ar ${SAMPLE_RATE} -ac 1 \
-        -f wav "$MID"
+  MID="$(mktemp -t waxon_mid.XXXXXX 2>/dev/null || echo "/tmp/waxon_mid.$RANDOM")"; MID="${MID}.wav"; TEMP_FILES+=("$MID")
+  DUR_PREP="$(ffprobe_duration_s "$IN")"
+  if ! ffmpeg_with_progress "$DUR_PREP" "prep"         -y -i "$IN" -af "$step1_af"         -c:a pcm_s24le -ar ${SAMPLE_RATE} -ac 1         -f wav "$MID"
   then
     echo "!! Step 1 failed for: $BASE (clip=${file_clipped})"
     FAILED=$((FAILED+1))
@@ -265,9 +305,7 @@ for IN in "${args[@]}"; do
 
   # Step 2a: measure for two-pass loudnorm (TP=0 so limiter is the only ceiling)
   PASS1="$(mktemp -t waxon_p1.XXXXXX.json 2>/dev/null || echo "/tmp/waxon_p1.$RANDOM.json")"; TEMP_FILES+=("$PASS1")
-  "$FFMPEG" -nostdin -hide_banner -v error -i "$MID" \
-    -af "loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:print_format=json" \
-    -f null - 2>"$PASS1"
+  "$FFMPEG" -nostdin -hide_banner -v error -i "$MID"     -af "loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:print_format=json"     -f null - 2>"$PASS1"
   P1_RC=$?
 
   MEAS_I="$(extract_json_num "$PASS1" input_i)"
@@ -302,13 +340,11 @@ for IN in "${args[@]}"; do
     fi
   fi
 
-  # Step 3: render to hidden temp
+  # Step 3: render to hidden temp with progress
   PASS2_LOG="$(mktemp -t waxon_p2.XXXXXX.log 2>/dev/null || echo "/tmp/waxon_p2.$RANDOM.log")"; TEMP_FILES+=("$PASS2_LOG")
+  DUR_RENDER="$(ffprobe_duration_s "$MID")"; [ "$DUR_RENDER" = "0" ] && DUR_RENDER="$DUR_PREP"
 
-  if "$FFMPEG" -nostdin -hide_banner -loglevel error -y \
-       -i "$MID" -af "$af" \
-       -c:a pcm_s24le -ar ${SAMPLE_RATE} -ac 1 \
-       -f wav "$TMP_WAV" 2>"$PASS2_LOG"
+  if ffmpeg_with_progress "$DUR_RENDER" "render"        -y -i "$MID" -af "$af"        -c:a pcm_s24le -ar ${SAMPLE_RATE} -ac 1        -f wav "$TMP_WAV"
   then
     if [[ ! -s "$TMP_WAV" ]]; then
       echo "!! Render produced no data: $TMP_WAV"
