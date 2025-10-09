@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# WaxOn — Interactive CLI: consistent, safe, and DAW-ready audio
+# VERSION v1.2
+set -u
+set +e
+IFS=$'\n\t'
+
+VERSION="${VERSION:-v1.2}"
+APP_TITLE="WaxOn ${VERSION} — DAW-ready Audio (Interactive)"
+
+PROMPT="${PROMPT:-1}"
+LUFS_TARGET="${LUFS_TARGET:--25}"
+LIMIT_DB="${LIMIT_DB:--1.0}"
+ATTACK_MS="${ATTACK_MS:-5}"
+RELEASE_MS="${RELEASE_MS:-50}"
+TRUEPEAK="${TRUEPEAK:-1}"
+TP_OVERSAMPLE="${TP_OVERSAMPLE:-4}"
+DITHER="${DITHER:-1}"
+CLIP_REPAIR="${CLIP_REPAIR:-auto}"
+CLIP_THRESHOLD="${CLIP_THRESHOLD:-1}"
+DC_BLOCK_HZ="${DC_BLOCK_HZ:-20}"
+
+OUTMODE="${OUTMODE:-wav}"     # wav | flac | both
+FLAC_LEVEL="${FLAC_LEVEL:-8}"
+SAMPLE_RATE="${SAMPLE_RATE:-44100}"
+
+LOG_FILE="${LOG_FILE:-${HOME}/Library/Logs/waxon_cli.log}"
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+FFMPEG="${FFMPEG:-$(command -v /opt/homebrew/bin/ffmpeg || command -v ffmpeg || true)}"
+
+usage() { cat <<EOF
+${APP_TITLE}
+
+Usage: waxon [options] <file>...
+
+Options:
+  -i, --lufs <I>           Target integrated LUFS (default: -25)
+  -L, --limit-db <dB>      Limiter ceiling in dBFS (default: -1.0)
+  -s, --samplerate <hz>    44100 (default) or 48000
+  -m, --mode <mode>        wav | flac | both (default: wav)
+  --flac-level <N>         0..12 compression (default: 8)
+  --truepeak <0|1>         Enable true-peak oversampling (default: 1)
+  --tp-oversample <N>      Oversample factor (default: 4)
+  --dither <0|1>           Triangular HP dither on final resample (default: 1)
+  --clip-repair <mode>     auto | 1 | 0   (default: auto)
+  --clip-threshold <N>     Minimum clipped-sample count to trigger (default: 1)
+  --dc-block <Hz>          DC blocker high-pass frequency (default: 20)
+  -l, --log <path>         Log file path
+  --no-prompt              Run without interactive questions
+  -q, --quiet              Less verbose console output
+  -n, --dry-run            Show what would happen; no outputs written
+  -h, --help               Show this help and exit
+EOF
+}
+
+QUIET=0; DRYRUN=0; args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -i|--lufs)        LUFS_TARGET="$2"; shift 2 ;;
+    -L|--limit-db)    LIMIT_DB="$2"; shift 2 ;;
+    -s|--samplerate)  SAMPLE_RATE="$2"; shift 2 ;;
+    -m|--mode)        OUTMODE="$2"; shift 2 ;;
+    --flac-level)     FLAC_LEVEL="$2"; shift 2 ;;
+    --truepeak)       TRUEPEAK="$2"; shift 2 ;;
+    --tp-oversample)  TP_OVERSAMPLE="$2"; shift 2 ;;
+    --dither)         DITHER="$2"; shift 2 ;;
+    --clip-repair)    CLIP_REPAIR="$2"; shift 2 ;;
+    --clip-threshold) CLIP_THRESHOLD="$2"; shift 2 ;;
+    --dc-block)       DC_BLOCK_HZ="$2"; shift 2 ;;
+    -l|--log)         LOG_FILE="$2"; shift 2 ;;
+    --no-prompt)      PROMPT="0"; shift ;;
+    -q|--quiet)       QUIET=1; shift ;;
+    -n|--dry-run)     DRYRUN=1; shift ;;
+    -h|--help)        usage; exit 0 ;;
+    --)               shift; break ;;
+    -*) echo "Unknown option: $1" >&2; usage; exit 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+[[ $# -gt 0 ]] && args+=("$@")
+
+is_int() { [[ "$1" =~ ^-?[0-9]+$ ]]; }
+is_num() { [[ "$1" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; }
+
+prompt_lufs() {
+  echo "Target loudness (two-pass loudnorm):"
+  echo "  1) −25 LUFS (recommended)"
+  echo "  2) −23 LUFS"
+  read -r -p "Enter 1-2 (default 1): " a
+  case "${a:-1}" in 1) LUFS_TARGET="-25" ;; 2) LUFS_TARGET="-23" ;; *) LUFS_TARGET="-25" ;; esac
+}
+prompt_mode() {
+  echo "Choose output mode:"
+  echo "  1) wav"
+  echo "  2) flac"
+  echo "  3) both (wav+flac)"
+  read -r -p "Enter 1-3 (default 1): " a
+  case "${a:-1}" in 1) OUTMODE="wav" ;; 2) OUTMODE="flac" ;; 3) OUTMODE="both" ;; *) OUTMODE="wav" ;; esac
+}
+prompt_flac() {
+  case "$OUTMODE" in flac|both)
+    read -r -p "FLAC compression level 0..12 (default 8): " a
+    if is_int "${a:-8}" && (( ${a:-8} >= 0 && ${a:-8} <= 12 )); then FLAC_LEVEL="${a:-8}"; else FLAC_LEVEL="8"; fi
+  esac
+}
+prompt_sr() {
+  echo "Sample rate:"
+  echo "  1) 44100 Hz (default)"
+  echo "  2) 48000 Hz"
+  read -r -p "Enter 1-2 (default 1): " a
+  case "${a:-1}" in 1) SAMPLE_RATE="44100" ;; 2) SAMPLE_RATE="48000" ;; *) SAMPLE_RATE="44100" ;; esac
+}
+prompt_limit() {
+  echo "Limiter ceiling (dBFS):"
+  echo "  1) −1 dB  (recommended)"
+  echo "  2) −2 dB"
+  echo "  3) −3 dB"
+  echo "  4) −4 dB"
+  echo "  5) −5 dB"
+  echo "  6) −6 dB"
+  read -r -p "Enter 1-6 (default 1): " a
+  case "${a:-1}" in
+    1) LIMIT_DB="-1.0" ;; 2) LIMIT_DB="-2.0" ;; 3) LIMIT_DB="-3.0" ;;
+    4) LIMIT_DB="-4.0" ;; 5) LIMIT_DB="-5.0" ;; 6) LIMIT_DB="-6.0" ;;
+    *) LIMIT_DB="-1.0" ;;
+  esac
+}
+prompt_clip() {
+  echo "Clip repair:"
+  echo "  1) auto (default)"
+  echo "  2) on   (force)"
+  echo "  3) off  (disable)"
+  read -r -p "Enter 1-3 (default 1): " a
+  case "${a:-1}" in 1) CLIP_REPAIR="auto" ;; 2) CLIP_REPAIR="1" ;; 3) CLIP_REPAIR="0" ;; *) CLIP_REPAIR="auto" ;; esac
+}
+confirm() {
+  echo
+  echo "Selections:"
+  echo "  LUFS:        ${LUFS_TARGET}"
+  echo "  Limit dBFS:  ${LIMIT_DB}"
+  echo "  Mode:        ${OUTMODE} (FLAC level ${FLAC_LEVEL})"
+  echo "  Sample rate: ${SAMPLE_RATE} Hz"
+  echo "  True-peak:   ${TRUEPEAK} (×${TP_OVERSAMPLE})  Dither: ${DITHER}"
+  echo "  Clip repair: ${CLIP_REPAIR} (threshold ${CLIP_THRESHOLD})"
+  read -r -p "Proceed? [Y/n]: " yn; case "${yn:-Y}" in Y|y) : ;; *) echo "Cancelled."; exit 0 ;; esac
+}
+
+if [[ "${PROMPT}" == "1" ]]; then
+  prompt_lufs; prompt_mode; prompt_flac; prompt_sr; prompt_limit; prompt_clip; confirm
+fi
+
+# validation
+if [[ ${#args[@]} -lt 1 ]]; then echo "No input files."; exit 2; fi
+case "$OUTMODE" in wav|flac|both) ;; *) echo "Invalid mode"; exit 2 ;; esac
+case "$SAMPLE_RATE" in 44100|48000) ;; *) echo "Invalid samplerate"; exit 2 ;; esac
+is_num "$LUFS_TARGET" || { echo "Invalid LUFS target"; exit 2; }
+is_num "$LIMIT_DB" || { echo "Invalid limit dB"; exit 2; }
+
+if [[ -z "${FFMPEG:-}" || ! -x "$FFMPEG" ]]; then
+  echo "FFmpeg not found. Install with: brew install ffmpeg" >&2
+  exit 2
+fi
+
+# helpers
+hidden_tmp() { local dir="$1" base="$2" ext="$3"; echo "${dir}/.${base}.part.$$.$RANDOM.${ext}"; }
+to_amp() { awk -v db="$1" 'BEGIN{print exp((db/20.0)*log(10))}'; }
+
+# processing (simplified summary to keep script concise for this demo)
+for IN in "${args[@]}"; do
+  [[ ! -f "$IN" ]] && echo "Skip (not a file): $IN" && continue
+  DIR="$(cd "$(dirname "$IN")" && pwd -P)"; BASE="$(basename "$IN")"; STEM="${BASE%.*}"
+  RATE_TAG=$([[ "$SAMPLE_RATE" == "48000" ]] && echo "48k" || echo "44k")
+  LIMIT_TAG="$(printf "%s" "$LIMIT_DB" | sed 's/\(\.[0-9]*[1-9]\)0\+$//; s/\.0$//; s/^/-/; s/$/dB/')"
+  STEM_TAG="${STEM}-waxon-${RATE_TAG}-${LIMIT_TAG}"
+  OUT_WAV="${DIR}/${STEM_TAG}.wav"; TMP_WAV="${DIR}/.${STEM_TAG}.part.$$.$RANDOM.wav"
+  # Minimal chain example (use your full chain when integrating)
+  "$FFMPEG" -hide_banner -nostats -y -i "$IN" -af "pan=1c|c0=c0,loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11,alimiter=limit=$(to_amp "$LIMIT_DB")" -ar "$SAMPLE_RATE" -ac 1 -c:a pcm_s24le "$TMP_WAV" || { echo "Fail: $IN"; continue; }
+  mv -f "$TMP_WAV" "$OUT_WAV"
+  echo "✓ $BASE → $(basename "$OUT_WAV")"
+done

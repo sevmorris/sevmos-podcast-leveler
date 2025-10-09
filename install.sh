@@ -1,62 +1,80 @@
 #!/usr/bin/env bash
-# WaxOn Installer — smart hybrid for both devs and end-users
-
 set -euo pipefail
 
-REPO_URL="https://github.com/sevmorris/WaxOn.git"
-RAW_SCRIPT_URL="https://raw.githubusercontent.com/sevmorris/WaxOn/main/waxon.sh"
-INSTALL_DIR="/usr/local/bin"
-CLONE_DIR="${HOME}/.local/share/waxon"
-SCRIPT_NAME="waxon"
-SCRIPT_FILE="waxon.sh"
+APP="waxon"
+SRC="./${APP}"
 
-# Detect Apple Silicon Homebrew path
-if [[ -d "/opt/homebrew/bin" && ! -w "$INSTALL_DIR" ]]; then
-  INSTALL_DIR="/opt/homebrew/bin"
+PREFIX="${PREFIX:-$HOME/bin}"   # default user-local
+MODE="copy"                     # copy | dev
+UNINSTALL=0
+
+usage() {
+  cat <<EOF
+${APP} installer
+
+Usage: ./install.sh [--prefix DIR] [--dev] [--uninstall]
+
+Options:
+  --prefix DIR   Install prefix (default: ~/bin; fallback ~/.local/bin)
+  --dev          Symlink from repo (development mode)
+  --uninstall    Remove installed binary (from prefix)
+  -h, --help     Show this help
+
+Environment:
+  PREFIX         Same as --prefix (overrides default)
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --prefix)   PREFIX="$2"; shift 2 ;;
+    --dev)      MODE="dev"; shift ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    -h|--help)  usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+if [[ "${PREFIX}" == "$HOME/bin" && ! -d "$HOME/bin" ]]; then
+  PREFIX="$HOME/.local/bin"
 fi
 
-echo "→ Installing WaxOn CLI into ${INSTALL_DIR}"
+TARGET="${PREFIX}/${APP}"
+mkdir -p "${PREFIX}"
 
-# Ensure Homebrew
-if ! command -v brew >/dev/null 2>&1; then
-  echo "→ Installing Homebrew..."
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+if [[ $UNINSTALL -eq 1 ]]; then
+  if [[ -e "$TARGET" ]]; then
+    rm -f "$TARGET"
+    echo "Removed $TARGET"
+  else
+    echo "No ${APP} found at $TARGET"
+  fi
+  exit 0
 fi
 
-# Ensure FFmpeg
-if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "→ Installing FFmpeg..."
-  brew install ffmpeg
+if [[ ! -f "$SRC" ]]; then
+  echo "Cannot find ${SRC}. Run this from the repo root." >&2
+  exit 1
 fi
-
-MODE="user"
-[[ "${1:-}" == "--dev" ]] && MODE="dev"
 
 if [[ "$MODE" == "dev" ]]; then
-  echo "→ Developer mode: cloning repo to ${CLONE_DIR}"
-  if [[ -d "${CLONE_DIR}/.git" ]]; then
-    git -C "${CLONE_DIR}" pull --quiet
-  else
-    git clone --depth=1 "${REPO_URL}" "${CLONE_DIR}"
-  fi
-  chmod +x "${CLONE_DIR}/${SCRIPT_FILE}"
-  sudo ln -sf "${CLONE_DIR}/${SCRIPT_FILE}" "${INSTALL_DIR}/${SCRIPT_NAME}"
+  ln -sfn "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")" "$TARGET"
+  echo "Symlinked (dev): $TARGET -> $SRC"
 else
-  echo "→ User mode: downloading latest script"
-  TMP="$(mktemp)"
-  curl -fsSL -o "$TMP" "$RAW_SCRIPT_URL"
-  chmod +x "$TMP"
-  sudo mv "$TMP" "${INSTALL_DIR}/${SCRIPT_NAME}"
+  install -m 0755 "$SRC" "$TARGET"
+  echo "Installed: $TARGET"
 fi
 
-echo "✅ Installed successfully to ${INSTALL_DIR}/${SCRIPT_NAME}"
-
-if command -v waxon >/dev/null 2>&1; then
-  echo
-  waxon --version || echo "WaxOn installed successfully."
+SHELLRC="${HOME}/.zshrc"
+LINE='export PATH="$HOME/bin:$HOME/.local/bin:$PATH"'
+if [[ -f "$SHELLRC" ]]; then
+  if ! grep -qs "$LINE" "$SHELLRC"; then
+    echo "$LINE" >> "$SHELLRC"
+    echo "Appended PATH update to ${SHELLRC}. Run: source ${SHELLRC}"
+  fi
+else
+  echo "$LINE" >> "$SHELLRC"
+  echo "Created ${SHELLRC} with PATH update. Run: source ${SHELLRC}"
 fi
 
-echo
-echo "🎧 Run WaxOn with:"
-echo "  waxon input.wav"
-[[ "$MODE" == "dev" ]] && echo "💡 To update: cd ${CLONE_DIR} && git pull"
+echo "Done."

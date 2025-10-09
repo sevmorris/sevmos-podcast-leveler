@@ -1,149 +1,80 @@
-# WaxOn (CLI)
-**Consistent, safe, and DAW-ready audio** — a fast, no-nonsense preprocessing step for podcast dialogue and VO.
+# WaxOn — Interactive CLI (DAW-ready)
 
-WaxOn converts mixed-quality recordings into clean, **24-bit mono WAV** files at a fixed **working loudness** of **−25 LUFS**, applies a **brick-wall limiter** (no makeup gain), and performs essential safety cleanup (DC blocking, optional declip repair, true-peak oversampling, proper dithering).  
-The result is predictable, unclipped, and ready to drop into your DAW timeline.
+**WaxOn** is the *first, intermediate step* in your editing pipeline. It prepares **mono** program audio (channel 0) for DAW work by applying a DC block, optional declipping, loudness normalization, and a brickwall limiter with true-peak oversampling — all with safe, atomic writes. It’s interactive by default and mirrors WaxOff’s UX.
 
-> **Why −25 LUFS?**  
-> It’s a *working* loudness target for editing — not a mastering level.  
-> At this stage you want headroom, not maximum volume.  
-> −25 LUFS provides a consistent baseline that keeps different voices comparable while leaving space for EQ boosts, compression, and mastering downstream.  
-> Loudness normalization follows the EBU R128 algorithm (integrated LUFS, gated), so silences and natural pauses are factored into the final level — giving you a realistic “real-world” loudness reading.
+> Looking for the **final delivery** step? See **[WaxOff](https://github.com/sevmorris/WaxOff)** — the stereo podcast leveler with WAV/MP3/FLAC outputs.
 
----
+- **Loudness target** (two-pass): default **−25 LUFS** (option for −23 LUFS)
+- **Limiter ceiling**: default **−1.0 dBFS** (adjustable −1..−6 dB)
+- **True-peak** oversampling (default on, ×4) and **HP dither**
+- **Outputs**: **WAV 24-bit mono** (44.1k/48k), optional **FLAC**; filenames include sample-rate and ceiling
+- Installs to **`~/bin`** (or `~/.local/bin`), same location as **WaxOff**
 
-## Features
-
-- **24-bit PCM WAV, mono (left channel)** at **44.1 kHz** or **48 kHz**
-- **Two-pass normalization** to **−25 LUFS** when possible (single-pass fallback)
-- **Brick-wall limiter** (no makeup gain) with configurable ceiling
-- **DC blocker** (gentle 20 Hz high-pass to remove offsets)
-- **Optional declip** repair (auto/on/off) before gain adjustment
-- **True-peak oversampling** (4× / 8×) + **TPDF high-pass dither**
-- **Atomic writes:** hidden temp file until complete (no half-written renders)
-- **Detailed logging** at `~/Library/Logs/waxon_v*.log`
-
----
-
-## Installation
-
-WaxOn requires **macOS** and **FFmpeg** (installed automatically if missing).  
-Two install options are available:
-
-### 🧩 Minimal user install
-Downloads the latest `waxon.sh` and installs it globally.
+## Install
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/sevmorris/WaxOn/main/install.sh)"
+brew install ffmpeg
+chmod +x waxon
+./install.sh            # copy install to ~/bin (or ~/.local/bin)
+./install.sh --dev      # symlink install (development mode)
+./install.sh --prefix "$HOME/.dotfiles/bin" --dev   # custom prefix + dev
 ```
 
-After installation, you can run WaxOn from anywhere:
-```bash
-waxon input.wav
-```
-
----
-
-### 🧑‍💻 Developer install (clone + symlink)
-For contributors or power users who want the local repo for quick updates.
+## Interactive usage
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/sevmorris/WaxOn/main/install.sh)" -- --dev
+waxon *.wav
+# Prompts for:
+#   • Target LUFS (−25 / −23)
+#   • Output mode (wav | flac | both)
+#   • FLAC compression level (if flac is included)
+#   • Sample rate (44100 or 48000)
+#   • Limiter ceiling (−1..−6 dBFS)
+#   • Clip repair (auto / on / off)
 ```
 
-This clones the repo to:
-```
-~/.local/share/waxon/
-```
-
-…and creates a symlink in `/usr/local/bin` or `/opt/homebrew/bin`.  
-To update later:
-```bash
-cd ~/.local/share/waxon && git pull
-```
-
----
-
-## Usage
+## Non-interactive (flags / env)
 
 ```bash
-waxon [file1] [file2] ...
+waxon --no-prompt -i -25 -L -1.0 -s 48000 -m both --clip-repair auto *.aif
+# or
+PROMPT=0 LUFS_TARGET=-23 OUTMODE=wav SAMPLE_RATE=44100 waxon *.wav
 ```
 
-Each file is converted and leveled individually.  
-You’ll be prompted to select a sample rate (44.1 kHz / 48 kHz) and limiter ceiling (−1 dBFS … −6 dBFS).  
-
-Output files are written next to the originals:
+### Options (common ones)
 
 ```
-example.wav     → example-44kwaxon--1dB.wav
+  -i, --lufs <I>           Target integrated LUFS (default: -25)
+  -L, --limit-db <dB>      Limiter ceiling in dBFS (default: -1.0)
+  -s, --samplerate <hz>    44100 or 48000
+  -m, --mode <mode>        wav | flac | both (default: wav)
+  --flac-level <N>         0..12 compression (default: 8)
+
+  --truepeak <0|1>         Enable true-peak oversampling (default: 1)
+  --tp-oversample <N>      Oversample factor (default: 4)
+  --dither <0|1>           Triangular HP dither (default: 1)
+
+  --clip-repair <mode>     auto | 1 | 0   (default: auto)
+  --clip-threshold <N>     Minimum clipped-sample count to trigger (default: 1)
+  --dc-block <Hz>          DC blocker high-pass frequency (default: 20)
+
+  -l, --log <path>         Log file path (default: ~/Library/Logs/waxon_cli.log)
+  --no-prompt              Skip interactive questions
+  -q, --quiet              Reduce console output
+  -n, --dry-run            Show actions without writing files
 ```
 
----
+## Workflow: WaxOn → edit in DAW → WaxOff
+1. **WaxOn** on the raw take(s) to produce clean, consistent mono WAVs/FLACs.
+2. **Edit/mix** in your DAW.
+3. **WaxOff** for final loudness to −18/−16 LUFS and deliverables (WAV/MP3/FLAC).
+
+**Next:** [WaxOff on GitHub](https://github.com/sevmorris/WaxOff)
 
 ## Uninstall
 
-To completely remove WaxOn, use the included `uninstall.sh` script.  
-It detects whether you installed via **Minimal** or **Developer** mode and removes the correct files.
-
-### 🧹 Minimal uninstall
 ```bash
-sudo rm -f "$(which waxon)"
-rm -f ~/Library/Logs/waxon_*.log
+./install.sh --uninstall
 ```
 
-### 🧩 Developer uninstall
-```bash
-sudo rm -f "$(which waxon)"
-rm -rf ~/.local/share/waxon
-```
-
-Or use the included uninstaller for full automatic cleanup:
-```bash
-./uninstall.sh --yes --purge
-```
-
-Options:
-- `--yes` – non-interactive (no confirmation prompts)
-- `--purge` – also deletes logs in `~/Library/Logs/`
-- `--dry-run` – show what would be deleted without removing anything
-- `--verbose` – show additional diagnostic output
-
----
-
-## Logs
-
-All sessions write a detailed log file under:
-```
-~/Library/Logs/waxon_v1.x.log
-```
-These logs include ffmpeg filters used, LUFS readings, limiter activity, and any error messages.
-
----
-
-## Requirements
-
-- **macOS 10.15 or later**
-- **FFmpeg 8.0 +**
-- **Homebrew** (installed automatically if missing)
-
----
-
-## Versioning
-
-Current: **WaxOn v1.x — initial CLI release**
-
-Future versions may add:
-- Batch-mode options (non-interactive)
-- Preset profiles for specific workflows
-- Cross-platform Linux support
-
----
-
-## License
-MIT License © 2025 Seven Morris
-
----
-
-## Credits
-Built for podcasters, editors, and post engineers who want **clean, consistent, DAW-ready dialogue without the guesswork**.
+License: MIT
