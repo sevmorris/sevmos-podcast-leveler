@@ -156,6 +156,18 @@ detect_clipped_samples() { # returns integer clipped count
     END{ if (sum=="") sum=0; print sum }'
 }
 
+# macOS file picker (when no filenames given and PROMPT=1)
+pick_files_macos() {
+  /usr/bin/osascript <<'OSA' 2>/dev/null
+set fp to choose file with prompt "Select one or more audio files for WaxOn:" with multiple selections allowed
+set out to ""
+repeat with f in fp
+  set out to out & POSIX path of f & "\n"
+end repeat
+return out
+OSA
+}
+
 # ------------------------------- Prompts --------------------------------------
 prompt_sr() {
   echo "Sample rate:"
@@ -203,12 +215,26 @@ confirm() {
   read -r -p "Proceed? [Y/n]: " yn; case "${yn:-Y}" in Y|y) : ;; *) echo "Cancelled."; exit 0 ;; esac
 }
 
+# -------------------- If no files provided, offer a picker --------------------
+if [[ ${#args[@]} -lt 1 && "${PROMPT}" == "1" ]]; then
+  picks="$(pick_files_macos || true)"
+  if [[ -n "${picks:-}" ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && args+=("$line")
+    done <<< "$picks"
+  fi
+fi
+
 # ------------------------------- Validation -----------------------------------
 if [[ "${PROMPT}" == "1" ]]; then
   prompt_sr; prompt_limit; prompt_clip; confirm
 fi
 
-if [[ ${#args[@]} -lt 1 ]]; then echo "No input files."; exit 2; fi
+if [[ ${#args[@]} -lt 1 ]]; then
+  echo "No input files selected. Tip: run 'waxon *.wav' or start without args to pick files via dialog."
+  exit 2
+fi
+
 case "$SAMPLE_RATE" in 44100|48000) ;; *) echo "Invalid samplerate"; exit 2 ;; esac
 is_num "$LIMIT_DB" || { echo "Invalid limit dB"; exit 2; }
 
@@ -217,13 +243,16 @@ if [[ -z "${FFMPEG:-}" || ! -x "$FFMPEG" ]]; then
   exit 2
 fi
 
-# ------------------------------- Logging --------------------------------------
+# ------------------------------- Logging (tee) --------------------------------
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-exec >>"$LOG_FILE" 2>&1
+# Mirror to console *and* log so you see progress
+exec > >(tee -a "$LOG_FILE") 2>&1
+
 echo "======== $(date '+%Y-%m-%d %H:%M:%S') — Run start ========"
 echo "Script: ${APP_TITLE}"
 echo "PATH=$PATH"
-echo "Args: ${args[*]}"
+printf "Args (%d):\n" "${#args[@]}"
+for a in "${args[@]}"; do echo "  - $a"; done
 $FFMPEG -version 2>/dev/null | head -n1 || true
 echo "Selections: lufs=-25 | limit=${LIMIT_DB} | sr=${SAMPLE_RATE} | tp=${TRUEPEAK}x${TP_OVERSAMPLE} | dither=${DITHER} | clip=${CLIP_REPAIR}/${CLIP_THRESHOLD} | dc=${DC_BLOCK_HZ}"
 
@@ -236,7 +265,8 @@ LIMIT_DB_CLEAN="$(strip_trailing_zero "$LIMIT_DB")"
 LIMIT_TAG="${LIMIT_DB_CLEAN}dB"
 RATE_TAG=$([[ "$SAMPLE_RATE" == "48000" ]] && echo "48k" || echo "44k")
 
-[[ $QUIET -eq 0 ]] && echo "${APP_TITLE}" && echo "Target=-25 LUFS | Mode=WAV | SR=${SAMPLE_RATE} | Limit=${LIMIT_DB} dB | TP=${TRUEPEAK}×${TP_OVERSAMPLE} | Dither=${DITHER}"
+echo "${APP_TITLE}"
+echo "Target=-25 LUFS | Mode=WAV | SR=${SAMPLE_RATE} | Limit=${LIMIT_DB} dB | TP=${TRUEPEAK}×${TP_OVERSAMPLE} | Dither=${DITHER}"
 
 for IN in "${args[@]}"; do
   INDEX=$((INDEX+1))
@@ -248,7 +278,7 @@ for IN in "${args[@]}"; do
   OUT_WAV="${DIR}/${STEM_TAG}.wav"
   TMP_WAV="$(hidden_tmp "$DIR" "$STEM_TAG" "wav")"; TEMP_FILES+=("$TMP_WAV")
 
-  [[ $QUIET -eq 0 ]] && echo "--> (${INDEX}/${TOTAL}) $IN"
+  echo "--> (${INDEX}/${TOTAL}) $IN"
 
   # Decide clip repair for this file (auto mode)
   apply_declip="0"; file_clipped="OFF"
@@ -346,6 +376,6 @@ for IN in "${args[@]}"; do
   fi
 done
 
-[[ $QUIET -eq 0 ]] && echo "Summary: OK=${OKC}  Failed=${FAILED}  Skipped=${SKIPPED} | Version: ${VERSION}"
-echo "======== $(date '+%Y-%m-%d %H:%M:%S') — Run end ========" >>"$LOG_FILE"
+echo "Summary: OK=${OKC}  Failed=${FAILED}  Skipped=${SKIPPED} | Version: ${VERSION}"
+echo "======== $(date '+%Y-%m-%d %H:%M:%S') — Run end ========"
 [[ $FAILED -gt 0 ]] && exit 1 || exit 0
