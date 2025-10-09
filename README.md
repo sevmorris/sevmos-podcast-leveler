@@ -44,6 +44,15 @@ waxon *.wav
 #   • Clip repair (auto / on / off)
 ```
 
+### Example
+
+```bash
+waxon ~/Audio_Raw/host_track.wav
+# → Outputs host_track-44k24_waxon-1dB.wav to the same directory
+```
+
+---
+
 ## Non-interactive usage (flags / env)
 
 ```bash
@@ -73,6 +82,20 @@ PROMPT=0 LUFS_TARGET=-23 OUTMODE=wav SAMPLE_RATE=44100 waxon *.wav
   --no-prompt              Skip interactive questions
   -q, --quiet              Reduce console output
   -n, --dry-run            Show actions without writing files
+```
+
+---
+
+## Updating
+
+To pull the latest version (dev install only):
+```bash
+cd ~/src/WaxOn && git pull && ./install.sh --dev
+```
+
+To reinstall the general version:
+```bash
+bash -c 'd=$(mktemp -d); git clone --depth=1 https://github.com/sevmorris/WaxOn "$d" && (cd "$d" && ./install.sh) && rm -rf "$d"'
 ```
 
 ---
