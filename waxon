@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WaxOn — Dialogue/VO Preprocessing (clean CLI)
+# WaxOn — Dialogue/VO Preprocessing (clean, friendly CLI)
 # DC block → (optional) clip-repair (adeclip) → normalize to −25 LUFS → TP ceiling −1 dBTP
 # Output: 24-bit mono WAV @ 44.1k or 48k. Atomic writes. TTY prompts. Clean console.
 
@@ -8,13 +8,13 @@ IFS=$'\n\t'
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
 
 # ---------- Defaults (env/flags can override) ----------
-VERSION="${VERSION:-v1.3.1}"
+VERSION="${VERSION:-v1.3.2}"
 PROMPT="${PROMPT:-1}"                 # 1 interactive, 0 flags/env
 TARGET_I="${TARGET_I:--25}"           # LUFS target for editing
 TARGET_TP="${TARGET_TP:--1.0}"        # true-peak safety
 SAMPLE_RATE="${SAMPLE_RATE:-44100}"   # 44100 | 48000
 CLIP_REPAIR="${CLIP_REPAIR:-auto}"    # auto|on|off  (uses adeclip when on/auto)
-DITHER="${DITHER:-1}"                  # 1 on, 0 off (to 24-bit)
+DITHER="${DITHER:-1}"                  # 1 on, 0 off (PCM quantize; ffmpeg doesn't expose noise-shaping)
 OUTDIR="${OUTDIR:-}"                  # empty = in-place
 QUIET="${QUIET:-0}"                   # 1 = less chat
 VERBOSE="${VERBOSE:-0}"               # 1 = more chat
@@ -138,7 +138,7 @@ say "${BOLD}WaxOn${NC} ${DIM}${VERSION}${NC}  ${DOT}  Target: ${BOLD}${TARGET_I}
 say "${DIM}Tip:${NC} Console output is clean; full details are in ${LOG}"
 
 # ---------- Build processing chain ----------
-# DC block (gentle highpass); remove the invalid adeclick=0.
+# DC block (gentle highpass)
 DCF="highpass=f=20"
 # Clip repair policy — use adeclip (de-clip). For 'auto', enable by default (simple, safe).
 case "$CLIP_REPAIR" in
@@ -150,7 +150,6 @@ esac
 NORM="loudnorm=I=${TARGET_I}:TP=${TARGET_TP}:LRA=11:linear=true:print_format=summary"
 # Downmix mono channel 0
 MONO="pan=mono|c0=c0"
-
 # 24-bit PCM
 PCM_CODEC="pcm_s24le"
 
