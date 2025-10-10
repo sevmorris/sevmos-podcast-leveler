@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# WaxOn — Dialogue/VO Preprocessing (reader-friendly CLI)
-# DC block → (optional) clip-repair → normalize to −25 LUFS → TP ceiling −1 dBTP
+# WaxOn — Dialogue/VO Preprocessing (clean CLI)
+# DC block → (optional) clip-repair (adeclip) → normalize to −25 LUFS → TP ceiling −1 dBTP
 # Output: 24-bit mono WAV @ 44.1k or 48k. Atomic writes. TTY prompts. Clean console.
 
 set -u
@@ -8,12 +8,12 @@ IFS=$'\n\t'
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
 
 # ---------- Defaults (env/flags can override) ----------
-VERSION="${VERSION:-v1.3}"
+VERSION="${VERSION:-v1.3.1}"
 PROMPT="${PROMPT:-1}"                 # 1 interactive, 0 flags/env
 TARGET_I="${TARGET_I:--25}"           # LUFS target for editing
 TARGET_TP="${TARGET_TP:--1.0}"        # true-peak safety
 SAMPLE_RATE="${SAMPLE_RATE:-44100}"   # 44100 | 48000
-CLIP_REPAIR="${CLIP_REPAIR:-auto}"    # auto|on|off
+CLIP_REPAIR="${CLIP_REPAIR:-auto}"    # auto|on|off  (uses adeclip when on/auto)
 DITHER="${DITHER:-1}"                  # 1 on, 0 off (to 24-bit)
 OUTDIR="${OUTDIR:-}"                  # empty = in-place
 QUIET="${QUIET:-0}"                   # 1 = less chat
@@ -58,9 +58,13 @@ atomic_write() {
   dir="$(dirname "$final")"; base="$(basename "$final")"; ext="${final##*.}"; stem="${base%.*}"
   tmp="${dir}/.${stem}.tmp.$$.$ext"
   mkdir -p "$dir" 2>/dev/null || true
-  ffmpeg -hide_banner -nostdin -y -f "$fmt" "$@" "$tmp" >>"$LOG" 2>&1
+  if [[ "$VERBOSE" = "1" ]]; then
+    ffmpeg -hide_banner -nostdin -y -f "$fmt" "$@" "$tmp" 2>>"$LOG" | tee -a "$LOG"
+  else
+    ffmpeg -hide_banner -nostdin -y -f "$fmt" "$@" "$tmp" >>"$LOG" 2>&1
+  fi
   local rc=$?
-  [[ $rc -eq 0 ]] && mv -f "$tmp" "$final"
+  [[ $rc -eq 0 ]] && mv -f "$tmp" "$final" || rm -f "$tmp"
   return $rc
 }
 
@@ -134,23 +138,21 @@ say "${BOLD}WaxOn${NC} ${DIM}${VERSION}${NC}  ${DOT}  Target: ${BOLD}${TARGET_I}
 say "${DIM}Tip:${NC} Console output is clean; full details are in ${LOG}"
 
 # ---------- Build processing chain ----------
-# DC block (very gentle highpass)
-DCF="highpass=f=20,adeclick=0"       # adeclick=0 is a no-op placeholder if you don’t want RX-like repair
-# Clip repair policy
+# DC block (gentle highpass); remove the invalid adeclick=0.
+DCF="highpass=f=20"
+# Clip repair policy — use adeclip (de-clip). For 'auto', enable by default (simple, safe).
 case "$CLIP_REPAIR" in
-  on)   REPAIR="aresample=resampler=soxr,adeclip" ;;     # FFmpeg's adeclip
-  auto) REPAIR="adeclip" ;;                              # fast, lightweight attempt
-  off)  REPAIR="anullsink"; REPAIR=""; ;;                # nothing
+  on)   REPAIR="adeclip" ;;
+  auto) REPAIR="adeclip" ;;
+  off)  REPAIR="" ;;
 esac
 # LUFS normalize (editing target) with linear=true = transparent
 NORM="loudnorm=I=${TARGET_I}:TP=${TARGET_TP}:LRA=11:linear=true:print_format=summary"
-# Limit true peaks via truepeak in loudnorm path; (loudnorm TP handles TP ceiling)
 # Downmix mono channel 0
 MONO="pan=mono|c0=c0"
 
-# Dither to 24-bit if requested (ffmpeg handles quantization on encode)
+# 24-bit PCM
 PCM_CODEC="pcm_s24le"
-[[ "$DITHER" = "0" ]] && PCM_CODEC="pcm_s24le"   # keep same codec; dithering minimal control in ffmpeg
 
 # ---------- Core per-file processing ----------
 ok=0; fail=0
@@ -167,31 +169,27 @@ process_one() {
 
   # Compose filtergraph
   local chain=""
-  [[ -n "$DCF" ]]   && chain+="${DCF},"
-  [[ -n "$REPAIR" ]]&& chain+="${REPAIR},"
+  [[ -n "$DCF" ]]    && chain+="${DCF},"
+  [[ -n "$REPAIR" ]] && chain+="${REPAIR},"
   chain+="${NORM},${MONO},aresample=${SAMPLE_RATE}:resampler=soxr"
 
   # Show one concise line
   printf "%s  %-38s  →  %s\n" "$DOT" "${base}" "${stem}-prep${TARGET_I}LUFS.wav" >"$TTY"
 
-  # Run (atomic)
+  # Run (atomic, explicit -f wav)
   mkdir -p "$outdir" 2>/dev/null || true
-  local tmp="${outdir}/.${stem}.tmp.$$ .wav"; tmp="${tmp// /}"  # ensure hidden tmp; keep .wav extension
-  if [[ "$VERBOSE" = "1" ]]; then
-    ffmpeg -hide_banner -nostdin -y -i "$in" -map 0:a:0 -vn \
-      -filter:a "$chain" -c:a "$PCM_CODEC" -ar "$SAMPLE_RATE" -dn "$tmp" 2>>"$LOG" | tee -a "$LOG"
-  else
-    ffmpeg -hide_banner -nostdin -y -i "$in" -map 0:a:0 -vn \
-      -filter:a "$chain" -c:a "$PCM_CODEC" -ar "$SAMPLE_RATE" -dn "$tmp" >>"$LOG" 2>&1
-  fi
-  local rc=$?
-  if [[ $rc -ne 0 ]]; then
-    err "${ERR} ${base}  (ffmpeg failed; see log)"
-    rm -f "$tmp"
-    return 1
+  if ! atomic_write "$out" wav -- -i "$in" -map 0:a:0 -vn \
+      -filter:a "$chain" -c:a "$PCM_CODEC" -ar "$SAMPLE_RATE" -dn ; then
+    # If soxr not available, retry without specifying resampler
+    warn "Retry with default resampler: ${base}"
+    if ! atomic_write "$out" wav -- -i "$in" -map 0:a:0 -vn \
+        -filter:a "${DCF:+$DCF,}${REPAIR:+$REPAIR,}${NORM},${MONO},aresample=${SAMPLE_RATE}" \
+        -c:a "$PCM_CODEC" -ar "$SAMPLE_RATE" -dn ; then
+      err "${ERR} ${base}  (ffmpeg failed; see log)"
+      return 1
+    fi
   fi
 
-  mv -f "$tmp" "$out"
   good "${OK} ${base}"
   return 0
 }
