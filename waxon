@@ -8,7 +8,7 @@ IFS=$'\n\t'
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
 
 # ---------- Defaults (env/flags can override) ----------
-VERSION="${VERSION:-v1.3.2}"
+VERSION="${VERSION:-v1.3.3}"
 PROMPT="${PROMPT:-1}"                 # 1 interactive, 0 flags/env
 TARGET_I="${TARGET_I:--25}"           # LUFS target for editing
 TARGET_TP="${TARGET_TP:--1.0}"        # true-peak safety
@@ -23,7 +23,7 @@ LOG="${LOG:-${HOME}/Library/Logs/waxon_cli.log}"
 TTY="/dev/tty"; [[ -w "$TTY" ]] || TTY="/dev/stdout"
 
 # ---------- UI helpers ----------
-_supports_color() { command -v tput >/dev/null && [ -t 1 ] && tput setaf 1 >/dev/null 2>&1; }
+_supports_color() { command -v tput >/dev/null && [ -t 1 ] && tput setaf 1 >/devnull 2>&1; }
 if _supports_color; then
   BOLD="$(tput bold)"; DIM="$(tput dim)"; NC="$(tput sgr0)"
   FG_OK="$(tput setaf 2)"; FG_WARN="$(tput setaf 3)"; FG_ERR="$(tput setaf 1)"; FG_INFO="$(tput setaf 6)"
@@ -48,8 +48,8 @@ log "Args: $*"
 log "ENV: VER=$VERSION PROMPT=$PROMPT TARGET_I=$TARGET_I TP=$TARGET_TP SR=$SAMPLE_RATE CLIP_REPAIR=$CLIP_REPAIR DITHER=$DITHER OUTDIR='${OUTDIR}' QUIET=$QUIET VERBOSE=$VERBOSE"
 command -v ffmpeg >/dev/null 2>&1 && ffmpeg -version | head -n1 >>"$LOG" 2>&1
 
-# ---------- Atomic writer (preserve extension; hint muxer) ----------
-# atomic_write <final_path> wav -- <ffmpeg args before output>
+# ---------- Atomic writer (preserve extension; ensure -f applies to OUTPUT) ----------
+# atomic_write <final_path> wav -- <ffmpeg args up to before output file>
 atomic_write() {
   local final="$1"; shift
   local fmt="$1"; shift
@@ -59,9 +59,10 @@ atomic_write() {
   tmp="${dir}/.${stem}.tmp.$$.$ext"
   mkdir -p "$dir" 2>/dev/null || true
   if [[ "$VERBOSE" = "1" ]]; then
-    ffmpeg -hide_banner -nostdin -y -f "$fmt" "$@" "$tmp" 2>>"$LOG" | tee -a "$LOG"
+    # Place -f *before output* so it doesn't affect the input demuxer
+    ffmpeg -hide_banner -nostdin -y "$@" -f "$fmt" "$tmp" 2>>"$LOG" | tee -a "$LOG"
   else
-    ffmpeg -hide_banner -nostdin -y -f "$fmt" "$@" "$tmp" >>"$LOG" 2>&1
+    ffmpeg -hide_banner -nostdin -y "$@" -f "$fmt" "$tmp" >>"$LOG" 2>&1
   fi
   local rc=$?
   [[ $rc -eq 0 ]] && mv -f "$tmp" "$final" || rm -f "$tmp"
@@ -134,23 +135,18 @@ if [[ "$PROMPT" = "1" && "$PROMPT_SET" = "0" ]]; then
 fi
 
 # ---------- One-time header ----------
-say "${BOLD}WaxOn${NC} ${DIM}${VERSION}${NC}  ${DOT}  Target: ${BOLD}${TARGET_I} LUFS${NC}  ${DOT}  TP ceiling: ${BOLD}${TARGET_TP} dBTP${NC}  ${DOT}  SR: ${BOLD}${SAMPLE_RATE} Hz${NC}"
-say "${DIM}Tip:${NC} Console output is clean; full details are in ${LOG}"
+say "WaxOn ${VERSION}  •  Target: ${TARGET_I} LUFS  •  TP ceiling: ${TARGET_TP} dBTP  •  SR: ${SAMPLE_RATE} Hz"
+say "Tip: Console output is clean; full details are in ${LOG}"
 
 # ---------- Build processing chain ----------
-# DC block (gentle highpass)
 DCF="highpass=f=20"
-# Clip repair policy — use adeclip (de-clip). For 'auto', enable by default (simple, safe).
 case "$CLIP_REPAIR" in
   on)   REPAIR="adeclip" ;;
   auto) REPAIR="adeclip" ;;
   off)  REPAIR="" ;;
 esac
-# LUFS normalize (editing target) with linear=true = transparent
 NORM="loudnorm=I=${TARGET_I}:TP=${TARGET_TP}:LRA=11:linear=true:print_format=summary"
-# Downmix mono channel 0
 MONO="pan=mono|c0=c0"
-# 24-bit PCM
 PCM_CODEC="pcm_s24le"
 
 # ---------- Core per-file processing ----------
@@ -166,20 +162,16 @@ process_one() {
   outdir="${OUTDIR:-$dir}"
   out="${outdir}/${stem}-prep${TARGET_I}LUFS.wav"
 
-  # Compose filtergraph
   local chain=""
   [[ -n "$DCF" ]]    && chain+="${DCF},"
   [[ -n "$REPAIR" ]] && chain+="${REPAIR},"
   chain+="${NORM},${MONO},aresample=${SAMPLE_RATE}:resampler=soxr"
 
-  # Show one concise line
   printf "%s  %-38s  →  %s\n" "$DOT" "${base}" "${stem}-prep${TARGET_I}LUFS.wav" >"$TTY"
 
-  # Run (atomic, explicit -f wav)
   mkdir -p "$outdir" 2>/dev/null || true
   if ! atomic_write "$out" wav -- -i "$in" -map 0:a:0 -vn \
       -filter:a "$chain" -c:a "$PCM_CODEC" -ar "$SAMPLE_RATE" -dn ; then
-    # If soxr not available, retry without specifying resampler
     warn "Retry with default resampler: ${base}"
     if ! atomic_write "$out" wav -- -i "$in" -map 0:a:0 -vn \
         -filter:a "${DCF:+$DCF,}${REPAIR:+$REPAIR,}${NORM},${MONO},aresample=${SAMPLE_RATE}" \
@@ -197,12 +189,11 @@ for f in "$@"; do
   process_one "$f" && ok=$((ok+1)) || fail=$((fail+1))
 done
 
-# ---------- Summary ----------
 echo "" >"$TTY"
 if [[ $fail -eq 0 ]]; then
-  say "${BOLD}Done.${NC}  ${OK} Files: ${ok} ok"
+  say "Done.  ${OK} Files: ${ok} ok"
 else
-  say "${BOLD}Done with issues.${NC}  ${OK} ${ok} ok   ${ERR} ${fail} failed"
+  say "Done with issues.  ${OK} ${ok} ok   ${ERR} ${fail} failed"
   say "See ${LOG} for details."
 fi
 
