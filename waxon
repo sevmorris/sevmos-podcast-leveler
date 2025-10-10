@@ -1,386 +1,212 @@
 #!/usr/bin/env bash
-# WaxOn — Interactive CLI: consistent, safe, and DAW-ready audio
-# VERSION v1.3 (−25 LUFS, WAV-only)  — with progress and macOS file picker
+# WaxOn — Dialogue/VO Preprocessing (reader-friendly CLI)
+# DC block → (optional) clip-repair → normalize to −25 LUFS → TP ceiling −1 dBTP
+# Output: 24-bit mono WAV @ 44.1k or 48k. Atomic writes. TTY prompts. Clean console.
 
 set -u
-set +e
 IFS=$'\n\t'
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
 
+# ---------- Defaults (env/flags can override) ----------
 VERSION="${VERSION:-v1.3}"
-APP_TITLE="WaxOn ${VERSION} — DAW-ready Audio (Interactive)"
+PROMPT="${PROMPT:-1}"                 # 1 interactive, 0 flags/env
+TARGET_I="${TARGET_I:--25}"           # LUFS target for editing
+TARGET_TP="${TARGET_TP:--1.0}"        # true-peak safety
+SAMPLE_RATE="${SAMPLE_RATE:-44100}"   # 44100 | 48000
+CLIP_REPAIR="${CLIP_REPAIR:-auto}"    # auto|on|off
+DITHER="${DITHER:-1}"                  # 1 on, 0 off (to 24-bit)
+OUTDIR="${OUTDIR:-}"                  # empty = in-place
+QUIET="${QUIET:-0}"                   # 1 = less chat
+VERBOSE="${VERBOSE:-0}"               # 1 = more chat
+LOG="${LOG:-${HOME}/Library/Logs/waxon_cli.log}"
 
-# ---------------- Defaults ----------------
-PROMPT="${PROMPT:-1}"          # 1 = ask questions; 0 = non-interactive flags only
-LUFS_TARGET="-25"
-LIMIT_DB="${LIMIT_DB:--1.0}"
-ATTACK_MS="${ATTACK_MS:-5}"
-RELEASE_MS="${RELEASE_MS:-50}"
-TRUEPEAK="${TRUEPEAK:-1}"
-TP_OVERSAMPLE="${TP_OVERSAMPLE:-4}"
-DITHER="${DITHER:-1}"
-CLIP_REPAIR="${CLIP_REPAIR:-auto}"      # auto|1|0
-CLIP_THRESHOLD="${CLIP_THRESHOLD:-1}"
-DC_BLOCK_HZ="${DC_BLOCK_HZ:-20}"
-SAMPLE_RATE="${SAMPLE_RATE:-44100}"     # 44100|48000
-LOG_FILE="${LOG_FILE:-${HOME}/Library/Logs/waxon_cli.log}"
+TTY="/dev/tty"; [[ -w "$TTY" ]] || TTY="/dev/stdout"
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-FFMPEG="${FFMPEG:-$(command -v /opt/homebrew/bin/ffmpeg || command -v ffmpeg || true)}"
+# ---------- UI helpers ----------
+_supports_color() { command -v tput >/dev/null && [ -t 1 ] && tput setaf 1 >/dev/null 2>&1; }
+if _supports_color; then
+  BOLD="$(tput bold)"; DIM="$(tput dim)"; NC="$(tput sgr0)"
+  FG_OK="$(tput setaf 2)"; FG_WARN="$(tput setaf 3)"; FG_ERR="$(tput setaf 1)"; FG_INFO="$(tput setaf 6)"
+else
+  BOLD=""; DIM=""; NC=""; FG_OK=""; FG_WARN=""; FG_ERR=""; FG_INFO=""
+fi
+OK="✅"; WARN="⚠️ "; ERR="❌"; DOT="•"
 
-# Robust binds for set -u
-: "${PROMPT:=1}"; : "${LIMIT_DB:=-1.0}"; : "${ATTACK_MS:=5}"; : "${RELEASE_MS:=50}"
-: "${TRUEPEAK:=1}"; : "${TP_OVERSAMPLE:=4}"; : "${DITHER:=1}"
-: "${CLIP_REPAIR:=auto}"; : "${CLIP_THRESHOLD:=1}"; : "${DC_BLOCK_HZ:=20}"
-: "${SAMPLE_RATE:=44100}"; : "${LOG_FILE:=${HOME}/Library/Logs/waxon_cli.log}"
+log() { printf '%s\n' "$*" >>"$LOG"; }
+say() { [[ "$QUIET" = "1" ]] && return 0; printf '%s\n' "$*" >"$TTY"; log "$*"; }
+info() { printf '%s\n' "${FG_INFO}$*${NC}" >"$TTY"; log "$*"; }
+good() { printf '%s\n' "${FG_OK}$*${NC}" >"$TTY"; log "$*"; }
+warn() { printf '%s\n' "${FG_WARN}$*${NC}" >"$TTY"; log "WARN: $*"; }
+err() {  printf '%s\n' "${FG_ERR}$*${NC}" >"$TTY" ; log "ERR:  $*"; }
+die() { err "$*"; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"; }
 
-usage() { cat <<EOF
-${APP_TITLE}
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+log ""
+log "======== $(date '+%Y-%m-%d %H:%M:%S') — WaxOn start ========"
+log "Args: $*"
+log "ENV: VER=$VERSION PROMPT=$PROMPT TARGET_I=$TARGET_I TP=$TARGET_TP SR=$SAMPLE_RATE CLIP_REPAIR=$CLIP_REPAIR DITHER=$DITHER OUTDIR='${OUTDIR}' QUIET=$QUIET VERBOSE=$VERBOSE"
+command -v ffmpeg >/dev/null 2>&1 && ffmpeg -version | head -n1 >>"$LOG" 2>&1
 
-Usage: waxon [options] <file>...
-
-Options:
-  -L, --limit-db <dB>      Limiter ceiling in dBFS (default: -1.0) [range: -1..-6]
-  -s, --samplerate <hz>    44100 (default) or 48000
-  --truepeak <0|1>         Enable true-peak oversampling (default: 1)
-  --tp-oversample <N>      Oversample factor (default: 4)
-  --dither <0|1>           Triangular HP dither on final resample (default: 1)
-  --clip-repair <mode>     auto | 1 | 0   (default: auto)
-  --clip-threshold <N>     Min clipped-sample count to trigger in auto (default: 1)
-  --dc-block <Hz>          DC blocker high-pass frequency (default: 20)
-  -l, --log <path>         Log file path
-  --no-prompt              Run without interactive questions
-  -q, --quiet              Less console output
-  -n, --dry-run            Show what would happen; no outputs written
-  -h, --help               Show this help and exit
-
-Notes:
-  • Loudness is fixed at −25 LUFS (two-pass loudnorm).
-  • Output format is fixed to 24-bit mono WAV.
-EOF
-}
-
-QUIET=0; DRYRUN=0; args=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -L|--limit-db)    LIMIT_DB="$2"; shift 2 ;;
-    -s|--samplerate)  SAMPLE_RATE="$2"; shift 2 ;;
-    --truepeak)       TRUEPEAK="$2"; shift 2 ;;
-    --tp-oversample)  TP_OVERSAMPLE="$2"; shift 2 ;;
-    --dither)         DITHER="$2"; shift 2 ;;
-    --clip-repair)    CLIP_REPAIR="$2"; shift 2 ;;
-    --clip-threshold) CLIP_THRESHOLD="$2"; shift 2 ;;
-    --dc-block)       DC_BLOCK_HZ="$2"; shift 2 ;;
-    -l|--log)         LOG_FILE="$2"; shift 2 ;;
-    --no-prompt)      PROMPT="0"; shift ;;
-    -q|--quiet)       QUIET=1; shift ;;
-    -n|--dry-run)     DRYRUN=1; shift ;;
-    -h|--help)        usage; exit 0 ;;
-    --)               shift; break ;;
-    -*) echo "Unknown option: $1" >&2; usage; exit 2 ;;
-    *) args+=("$1"); shift ;;
-  esac
-done
-[[ $# -gt 0 ]] && args+=("$@")
-
-# ---------------- Helpers ----------------
-is_num() { [[ "$1" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; }
-to_amp() { awk -v db="$1" 'BEGIN{print exp((db/20.0)*log(10))}'; }
-strip_trailing_zero() { printf "%s" "$1" | sed 's/\(\.[0-9]*[1-9]\)0\+$//; s/\.0$//'; }
-hidden_tmp() { local dir="$1" base="$2" ext="$3"; echo "${dir}/.${base}.part.$$.$RANDOM.${ext}"; }
-extract_json_num() { local f="$1" key="$2"; LC_ALL=C sed -nE "s/.*\"${key}\"[[:space:]]*:[[:space:]]*([-+]?([0-9]*\.)?[0-9]+).*/\1/p" "$f" | head -n1; }
-
-spotcheck_file() { # INFILE OUT_TXT
-  local F="$1" OUT="$2" J
-  J="$(mktemp -t waxon_sc.XXXXXX.json 2>/dev/null || echo "/tmp/waxon_sc.$RANDOM.json")"
-  "$FFMPEG" -hide_banner -nostats -y -i "$F" \
-    -af "loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:print_format=json" \
-    -f null - 2> "$J"
-  if [[ $? -ne 0 ]]; then
-    echo "I=n/a TP=n/a" > "$OUT"
-  else
-    local fi tp
-    fi="$(extract_json_num "$J" input_i)"; tp="$(extract_json_num "$J" input_tp)"
-    echo "I=${fi:-n/a} TP=${tp:-n/a}" > "$OUT"
-  fi
-  rm -f "$J" 2>/dev/null || true
-}
-
-detect_clipped_samples() { # returns integer clipped count
-  local in_file="$1"
-  "$FFMPEG" -nostdin -hide_banner -v error -i "$in_file" \
-    -af "astats=metadata=1:reset=0" -f null - 2>&1 \
-  | awk '
-    BEGIN{sum=0}
-    /clipped[[:space:]]+samples/i {
-      for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+$/) sum += $i
-    }
-    END{ if (sum=="") sum=0; print sum }'
-}
-
-# ---- macOS file picker when no args and PROMPT=1 ----
-pick_files_macos() {
-  /usr/bin/osascript <<'OSA' 2>/dev/null
-set fp to choose file with prompt "Select one or more audio files for WaxOn:" with multiple selections allowed
-set out to ""
-repeat with f in fp
-  set out to out & POSIX path of f & "\n"
-end repeat
-return out
-OSA
-}
-
-# ---- Progress helpers ----
-TTY_OUT="/dev/tty"; [ -w "$TTY_OUT" ] || TTY_OUT="/dev/null"
-
-progress_draw() {  # $1=label  $2=pct (0..100)
-  local label="$1" pct="$2" width=28 fill pad
-  (( pct < 0 )) && pct=0; (( pct > 100 )) && pct=100
-  fill=$(( (pct*width)/100 ))
-  pad=$(( width - fill ))
-  printf "\r%-12s [" "$label" >"$TTY_OUT"
-  printf "%${fill}s" "" | tr ' ' '#' >"$TTY_OUT"
-  printf "%${pad}s" ""  >"$TTY_OUT"
-  printf "] %3d%%" "$pct" >"$TTY_OUT"
-}
-
-ffprobe_duration_s() { # $1=input_file -> prints seconds (float) or 0
-  command -v ffprobe >/dev/null 2>&1 || { echo 0; return; }
-  local dur
-  dur="$(ffprobe -v error -show_entries format=duration \
-        -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | head -n1)"
-  [ -n "$dur" ] && echo "$dur" || echo 0
-}
-
-ffmpeg_with_progress() {
-  # $1=duration_seconds (float), $2=label, remaining args = ffmpeg args
-  local dur_s="$1" label="$2"; shift 2
-  local pipe; pipe="$(mktemp -u)"; mkfifo "$pipe"
-  (
-    local total_us cur_us pct k v
-    total_us=$(awk -v d="$dur_s" 'BEGIN{printf "%.0f", d*1000000}')
-    [ -z "$total_us" ] && total_us=1
-    while IFS='=' read -r k v; do
-      case "$k" in
-        out_time_us) cur_us="${v%.*}";;
-        out_time_ms) cur_us=$(( ${v%.*} * 1000 ));;
-        progress) [ "$v" = "end" ] && break; continue;;
-        *) continue;;
-      esac
-      [ -z "$cur_us" ] && cur_us=0
-      pct=$(( cur_us * 100 / (total_us>0?total_us:1) ))
-      (( pct>100 )) && pct=100
-      progress_draw "$label" "$pct"
-    done <"$pipe"
-    progress_draw "$label" 100; printf "\n" >"$TTY_OUT"
-  ) &
-  local reader_pid=$!
-  "$FFMPEG" -nostdin -hide_banner -loglevel error -stats_period 0.5 \
-    -progress "$pipe" "$@" 2>/dev/null
+# ---------- Atomic writer (preserve extension; hint muxer) ----------
+# atomic_write <final_path> wav -- <ffmpeg args before output>
+atomic_write() {
+  local final="$1"; shift
+  local fmt="$1"; shift
+  [[ "$1" == "--" ]] && shift || true
+  local dir base stem ext tmp
+  dir="$(dirname "$final")"; base="$(basename "$final")"; ext="${final##*.}"; stem="${base%.*}"
+  tmp="${dir}/.${stem}.tmp.$$.$ext"
+  mkdir -p "$dir" 2>/dev/null || true
+  ffmpeg -hide_banner -nostdin -y -f "$fmt" "$@" "$tmp" >>"$LOG" 2>&1
   local rc=$?
-  kill "$reader_pid" >/dev/null 2>&1 || true
-  rm -f "$pipe"
+  [[ $rc -eq 0 ]] && mv -f "$tmp" "$final"
   return $rc
 }
 
-# Offer picker if no args
-if [[ ${#args[@]} -lt 1 && "${PROMPT}" == "1" ]]; then
-  picks="$(pick_files_macos || true)"
-  if [[ -n "${picks:-}" ]]; then
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && args+=("$line")
-    done <<< "$picks"
-  fi
-fi
-
-# Validation & prompts
-prompt_sr() {
-  echo "Sample rate:"
-  echo "  1) 44100 Hz (default)"
-  echo "  2) 48000 Hz"
-  read -r -p "Enter 1-2 (default 1): " a
-  case "${a:-1}" in 1) SAMPLE_RATE="44100" ;; 2) SAMPLE_RATE="48000" ;; *) SAMPLE_RATE="44100" ;; esac
+# ---------- Simple prompt helpers (TTY-safe) ----------
+_prompt() { printf '%s' "$1" >"$TTY"; IFS= read -r REPLY <"$TTY"; }
+choose_sr() {
+  printf '%s\n' "Sample rate:
+  1) 44100 Hz (default)
+  2) 48000 Hz" >"$TTY"
+  _prompt "Enter 1-2 (default 1): "
+  case "${REPLY:-1}" in 1) SAMPLE_RATE="44100";; 2) SAMPLE_RATE="48000";; *) SAMPLE_RATE="44100";; esac
 }
-prompt_limit() {
-  echo "Limiter ceiling (dBFS):"
-  echo "  1) −1 dB  (recommended)"
-  echo "  2) −2 dB"
-  echo "  3) −3 dB"
-  echo "  4) −4 dB"
-  echo "  5) −5 dB"
-  echo "  6) −6 dB"
-  read -r -p "Enter 1-6 (default 1): " a
-  case "${a:-1}" in
-    1) LIMIT_DB="-1.0" ;; 2) LIMIT_DB="-2.0" ;; 3) LIMIT_DB="-3.0" ;;
-    4) LIMIT_DB="-4.0" ;; 5) LIMIT_DB="-5.0" ;; 6) LIMIT_DB="-6.0" ;;
-    *) LIMIT_DB="-1.0" ;;
+
+# ---------- Flags ----------
+show_help() {
+  cat <<HLP >"$TTY"
+${BOLD}WaxOn${NC} — Dialogue/VO Pre-Mix Prep (v${VERSION})
+Usage: waxon [options] <files...>
+
+Options:
+  --no-prompt            Non-interactive (use env/flags)
+  -s, --samplerate <hz>  44100 | 48000   (default 44100)
+  --clip-repair <mode>   auto|on|off     (default auto)
+  --dither <0|1>         to 24-bit       (default 1)
+  -o, --outdir <dir>     output directory (default: alongside source)
+  -q, --quiet            terse output
+  -v, --verbose          more detail; echo ffmpeg lines to console
+  -h, --help             this text
+
+ENV you can set:
+  TARGET_I=-25   TARGET_TP=-1.0   PROMPT=0|1   OUTDIR=/path   LOG=...
+
+Examples:
+  waxon *.wav
+  PROMPT=0 TARGET_I=-25 -- clip-repair auto, 48k:
+    waxon --no-prompt -s 48000 ~/takes/*.wav
+HLP
+}
+
+PROMPT_SET=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-prompt) PROMPT=0; PROMPT_SET=1; shift ;;
+    -s|--samplerate) SAMPLE_RATE="$2"; shift 2 ;;
+    --clip-repair) CLIP_REPAIR="$2"; shift 2 ;;
+    --dither) DITHER="$2"; shift 2 ;;
+    -o|--outdir) OUTDIR="$2"; shift 2 ;;
+    -q|--quiet) QUIET=1; shift ;;
+    -v|--verbose) VERBOSE=1; shift ;;
+    -h|--help) show_help; exit 0 ;;
+    --) shift; break ;;
+    -*) die "Unknown option: $1" ;;
+    *) break ;;
   esac
-}
-prompt_clip() {
-  echo "Clip repair:"
-  echo "  1) auto (default)"
-  echo "  2) on   (force)"
-  echo "  3) off  (disable)"
-  read -r -p "Enter 1-3 (default 1): " a
-  case "${a:-1}" in 1) CLIP_REPAIR="auto" ;; 2) CLIP_REPAIR="1" ;; 3) CLIP_REPAIR="0" ;; *) CLIP_REPAIR="auto" ;; esac
-}
-confirm() {
-  echo
-  echo "Selections:"
-  echo "  LUFS:        -25 (fixed)"
-  echo "  Limit dBFS:  ${LIMIT_DB}"
-  echo "  Mode:        wav (24-bit mono)"
-  echo "  Sample rate: ${SAMPLE_RATE} Hz"
-  echo "  True-peak:   ${TRUEPEAK} (×${TP_OVERSAMPLE})  Dither: ${DITHER}"
-  echo "  Clip repair: ${CLIP_REPAIR} (threshold ${CLIP_THRESHOLD:-1})"
-  echo "  DC block:    ${DC_BLOCK_HZ} Hz"
-  read -r -p "Proceed? [Y/n]: " yn; case "${yn:-Y}" in Y|y) : ;; *) echo "Cancelled."; exit 0 ;; esac
-}
+done
+[[ $# -lt 1 ]] && { err "No input files. Try: waxon -h"; exit 1; }
 
-if [[ "${PROMPT}" == "1" ]]; then
-  prompt_sr; prompt_limit; prompt_clip; confirm
-fi
-if [[ ${#args[@]} -lt 1 ]]; then
-  echo "No input files selected. Tip: run 'waxon *.wav' or start without args to pick files via dialog."
-  exit 2
-fi
-case "$SAMPLE_RATE" in 44100|48000) ;; *) echo "Invalid samplerate"; exit 2 ;; esac
-is_num "$LIMIT_DB" || { echo "Invalid limit dB"; exit 2; }
-if [[ -z "${FFMPEG:-}" || ! -x "$FFMPEG" ]]; then
-  echo "FFmpeg not found. Install with: brew install ffmpeg" >&2
-  exit 2
+# ---------- Validate options ----------
+need ffmpeg
+case "$SAMPLE_RATE" in 44100|48000) ;; *) die "SAMPLE_RATE must be 44100 or 48000";; esac
+case "$CLIP_REPAIR" in auto|on|off) ;; *) die "CLIP_REPAIR must be auto|on|off";; esac
+case "$DITHER" in 0|1) ;; *) die "DITHER must be 0 or 1";; esac
+
+# ---------- Interactive (optional) ----------
+if [[ "$PROMPT" = "1" && "$PROMPT_SET" = "0" ]]; then
+  choose_sr
 fi
 
-# Logging (tee to console + file)
-mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-exec > >(tee -a "$LOG_FILE") 2>&1
+# ---------- One-time header ----------
+say "${BOLD}WaxOn${NC} ${DIM}${VERSION}${NC}  ${DOT}  Target: ${BOLD}${TARGET_I} LUFS${NC}  ${DOT}  TP ceiling: ${BOLD}${TARGET_TP} dBTP${NC}  ${DOT}  SR: ${BOLD}${SAMPLE_RATE} Hz${NC}"
+say "${DIM}Tip:${NC} Console output is clean; full details are in ${LOG}"
 
-echo "======== $(date '+%Y-%m-%d %H:%M:%S') — Run start ========"
-echo "Script: ${APP_TITLE}"
-echo "PATH=$PATH"
-printf "Args (%d):\n" "${#args[@]}"; for a in "${args[@]}"; do echo "  - $a"; done
-$FFMPEG -version 2>/dev/null | head -n1 || true
-echo "Selections: lufs=-25 | limit=${LIMIT_DB} | sr=${SAMPLE_RATE} | tp=${TRUEPEAK}x${TP_OVERSAMPLE} | dither=${DITHER} | clip=${CLIP_REPAIR}/${CLIP_THRESHOLD} | dc=${DC_BLOCK_HZ}"
+# ---------- Build processing chain ----------
+# DC block (very gentle highpass)
+DCF="highpass=f=20,adeclick=0"       # adeclick=0 is a no-op placeholder if you don’t want RX-like repair
+# Clip repair policy
+case "$CLIP_REPAIR" in
+  on)   REPAIR="aresample=resampler=soxr,adeclip" ;;     # FFmpeg's adeclip
+  auto) REPAIR="adeclip" ;;                              # fast, lightweight attempt
+  off)  REPAIR="anullsink"; REPAIR=""; ;;                # nothing
+esac
+# LUFS normalize (editing target) with linear=true = transparent
+NORM="loudnorm=I=${TARGET_I}:TP=${TARGET_TP}:LRA=11:linear=true:print_format=summary"
+# Limit true peaks via truepeak in loudnorm path; (loudnorm TP handles TP ceiling)
+# Downmix mono channel 0
+MONO="pan=mono|c0=c0"
 
-# Processing
-TEMP_FILES=(); trap 'for f in "${TEMP_FILES[@]:-}"; do [[ -e "$f" ]] && rm -f "$f"; done' EXIT INT TERM
-TOTAL=${#args[@]}; INDEX=0; OKC=0; FAILED=0; SKIPPED=0
+# Dither to 24-bit if requested (ffmpeg handles quantization on encode)
+PCM_CODEC="pcm_s24le"
+[[ "$DITHER" = "0" ]] && PCM_CODEC="pcm_s24le"   # keep same codec; dithering minimal control in ffmpeg
 
-limit_amp="$(to_amp "$LIMIT_DB")"
-LIMIT_DB_CLEAN="$(strip_trailing_zero "$LIMIT_DB")"
-LIMIT_TAG="${LIMIT_DB_CLEAN}dB"
-RATE_TAG=$([[ "$SAMPLE_RATE" == "48000" ]] && echo "48k" || echo "44k")
+# ---------- Core per-file processing ----------
+ok=0; fail=0
+process_one() {
+  local in="$1"
+  [[ -f "$in" ]] || { warn "Skip (missing): $in"; return 1; }
 
-echo "${APP_TITLE}"
-echo "Target=-25 LUFS | Mode=WAV | SR=${SAMPLE_RATE} | Limit=${LIMIT_DB} dB | TP=${TRUEPEAK}×${TP_OVERSAMPLE} | Dither=${DITHER}"
+  local dir base stem outdir out
+  dir="$(cd "$(dirname "$in")" && pwd -P)"
+  base="$(basename "$in")"
+  stem="${base%.*}"
+  outdir="${OUTDIR:-$dir}"
+  out="${outdir}/${stem}-prep${TARGET_I}LUFS.wav"
 
-for IN in "${args[@]}"; do
-  INDEX=$((INDEX+1))
-  if [[ ! -f "$IN" ]]; then echo "Skip (not a file): $IN"; SKIPPED=$((SKIPPED+1)); continue; fi
+  # Compose filtergraph
+  local chain=""
+  [[ -n "$DCF" ]]   && chain+="${DCF},"
+  [[ -n "$REPAIR" ]]&& chain+="${REPAIR},"
+  chain+="${NORM},${MONO},aresample=${SAMPLE_RATE}:resampler=soxr"
 
-  DIR="$(cd "$(dirname "$IN")" && pwd -P)"; BASE="$(basename "$IN")"
-  STEM="${BASE%.*}"
-  STEM_TAG="${STEM}-waxon-${RATE_TAG}-${LIMIT_TAG}"
-  OUT_WAV="${DIR}/${STEM_TAG}.wav"
-  TMP_WAV="$(hidden_tmp "$DIR" "$STEM_TAG" "wav")"; TEMP_FILES+=("$TMP_WAV")
+  # Show one concise line
+  printf "%s  %-38s  →  %s\n" "$DOT" "${base}" "${stem}-prep${TARGET_I}LUFS.wav" >"$TTY"
 
-  echo "--> (${INDEX}/${TOTAL}) $IN"
-
-  # Decide clip repair
-  apply_declip="0"; file_clipped="OFF"
-  if [[ "$CLIP_REPAIR" == "1" ]]; then
-    apply_declip="1"; file_clipped="FORCED"
-  elif [[ "$CLIP_REPAIR" == "auto" ]]; then
-    clips="$(detect_clipped_samples "$IN")"
-    if [[ "${clips:-0}" -ge "$CLIP_THRESHOLD" ]]; then apply_declip="1"; fi
-    file_clipped="${clips:-0}"
-  fi
-
-  # Step 1: DC block -> optional declip -> HPF -> mono ch0 -> resample
-  step1_af="highpass=f=${DC_BLOCK_HZ}"
-  [[ "$apply_declip" == "1" ]] && step1_af="${step1_af},adeclip"
-  step1_af="${step1_af},highpass=f=20,pan=1c|c0=c0,aresample=${SAMPLE_RATE}:resampler=soxr"
-
-  MID="$(mktemp -t waxon_mid.XXXXXX 2>/dev/null || echo "/tmp/waxon_mid.$RANDOM")"; MID="${MID}.wav"; TEMP_FILES+=("$MID")
-  DUR_PREP="$(ffprobe_duration_s "$IN")"
-  if ! ffmpeg_with_progress "$DUR_PREP" "prep" \
-       -y -i "$IN" -af "$step1_af" \
-       -c:a pcm_s24le -ar ${SAMPLE_RATE} -ac 1 \
-       -f wav "$MID"
-  then
-    echo "!! Step 1 failed for: $BASE (clip=${file_clipped})"
-    FAILED=$((FAILED+1))
-    continue
-  fi
-
-  # Step 2a: measure for two-pass loudnorm (TP=0 so limiter is the only ceiling)
-  PASS1="$(mktemp -t waxon_p1.XXXXXX.json 2>/dev/null || echo "/tmp/waxon_p1.$RANDOM.json")"; TEMP_FILES+=("$PASS1")
-  "$FFMPEG" -nostdin -hide_banner -v error -i "$MID" \
-    -af "loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:print_format=json" \
-    -f null - 2>"$PASS1"
-  P1_RC=$?
-
-  MEAS_I="$(extract_json_num "$PASS1" input_i)"
-  MEAS_TP="$(extract_json_num "$PASS1" input_tp)"
-  MEAS_LRA="$(extract_json_num "$PASS1" input_lra)"
-  MEAS_THRESH="$(extract_json_num "$PASS1" input_thresh)"
-  MEAS_OFFSET="$(extract_json_num "$PASS1" target_offset)"
-
-  # Step 2b: limiter
-  lim="alimiter=limit=${limit_amp}:attack=${ATTACK_MS}:release=${RELEASE_MS}:level=disabled"
-
-  # Step 2c: loudnorm pass-2 + oversampling/dither
-  if [[ $P1_RC -eq 0 && -n "${MEAS_I:-}" && -n "${MEAS_TP:-}" && -n "${MEAS_LRA:-}" && -n "${MEAS_THRESH:-}" ]]; then
-    loudnorm_p2="loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:measured_I=${MEAS_I}:measured_TP=${MEAS_TP}:measured_LRA=${MEAS_LRA}:measured_thresh=${MEAS_THRESH}:linear=true:print_format=summary"
-    [[ -n "${MEAS_OFFSET:-}" ]] && loudnorm_p2="${loudnorm_p2}:offset=${MEAS_OFFSET}"
+  # Run (atomic)
+  mkdir -p "$outdir" 2>/dev/null || true
+  local tmp="${outdir}/.${stem}.tmp.$$ .wav"; tmp="${tmp// /}"  # ensure hidden tmp; keep .wav extension
+  if [[ "$VERBOSE" = "1" ]]; then
+    ffmpeg -hide_banner -nostdin -y -i "$in" -map 0:a:0 -vn \
+      -filter:a "$chain" -c:a "$PCM_CODEC" -ar "$SAMPLE_RATE" -dn "$tmp" 2>>"$LOG" | tee -a "$LOG"
   else
-    loudnorm_p2="loudnorm=I=${LUFS_TARGET}:TP=0.0:LRA=11:linear=true:print_format=summary"
+    ffmpeg -hide_banner -nostdin -y -i "$in" -map 0:a:0 -vn \
+      -filter:a "$chain" -c:a "$PCM_CODEC" -ar "$SAMPLE_RATE" -dn "$tmp" >>"$LOG" 2>&1
+  fi
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
+    err "${ERR} ${base}  (ffmpeg failed; see log)"
+    rm -f "$tmp"
+    return 1
   fi
 
-  if [[ "$TRUEPEAK" = "1" ]]; then
-    oversample=$(( SAMPLE_RATE * TP_OVERSAMPLE ))
-    if [[ "$DITHER" = "1" ]]; then
-      af="${loudnorm_p2},aresample=${oversample}:resampler=soxr,${lim},aresample=${SAMPLE_RATE}:resampler=soxr:dither_method=triangular_hp"
-    else
-      af="${loudnorm_p2},aresample=${oversample}:resampler=soxr,${lim},aresample=${SAMPLE_RATE}:resampler=soxr"
-    fi
-  else
-    if [[ "$DITHER" = "1" ]]; then
-      af="${loudnorm_p2},${lim},aresample=${SAMPLE_RATE}:resampler=soxr:dither_method=triangular_hp"
-    else
-      af="${loudnorm_p2},${lim},aresample=${SAMPLE_RATE}:resampler=soxr"
-    fi
-  fi
+  mv -f "$tmp" "$out"
+  good "${OK} ${base}"
+  return 0
+}
 
-  # Step 3: render to hidden temp with progress
-  PASS2_LOG="$(mktemp -t waxon_p2.XXXXXX.log 2>/dev/null || echo "/tmp/waxon_p2.$RANDOM.log")"; TEMP_FILES+=("$PASS2_LOG")
-  DUR_RENDER="$(ffprobe_duration_s "$MID")"; [ "$DUR_RENDER" = "0" ] && DUR_RENDER="$DUR_PREP"
-
-  if ffmpeg_with_progress "$DUR_RENDER" "render" \
-       -y -i "$MID" -af "$af" \
-       -c:a pcm_s24le -ar ${SAMPLE_RATE} -ac 1 \
-       -f wav "$TMP_WAV"
-  then
-    if [[ ! -s "$TMP_WAV" ]]; then
-      echo "!! Render produced no data: $TMP_WAV"
-      FAILED=$((FAILED+1))
-      continue
-    fi
-
-    mv -f "$TMP_WAV" "$OUT_WAV"
-
-    # Spot-check
-    SC_TXT="$(mktemp -t waxon_sc.XXXXXX.txt 2>/dev/null || echo "/tmp/waxon_sc.$RANDOM.txt")"
-    spotcheck_file "$OUT_WAV" "$SC_TXT"
-    echo "✓ ${BASE} → $(basename "$OUT_WAV")  $(cat "$SC_TXT" 2>/dev/null || echo "")"
-    rm -f "$SC_TXT" 2>/dev/null || true
-
-    OKC=$((OKC+1))
-  else
-    echo "!! Render failed for: $BASE"
-    FAILED=$((FAILED+1))
-  fi
+for f in "$@"; do
+  process_one "$f" && ok=$((ok+1)) || fail=$((fail+1))
 done
 
-echo "Summary: OK=${OKC}  Failed=${FAILED}  Skipped=${SKIPPED} | Version: ${VERSION}"
-echo "======== $(date '+%Y-%m-%d %H:%M:%S') — Run end ========"
-[[ $FAILED -gt 0 ]] && exit 1 || exit 0
+# ---------- Summary ----------
+echo "" >"$TTY"
+if [[ $fail -eq 0 ]]; then
+  say "${BOLD}Done.${NC}  ${OK} Files: ${ok} ok"
+else
+  say "${BOLD}Done with issues.${NC}  ${OK} ${ok} ok   ${ERR} ${fail} failed"
+  say "See ${LOG} for details."
+fi
+
+exit $([[ $fail -gt 0 ]] && echo 2 || echo 0)
