@@ -88,12 +88,6 @@ WAXON_PROMPT=0 SAMPLE_RATE=48000 LIMIT_DB=-2.0 CLIP_REPAIR=auto waxon *.mp3
 
 ---
 
-## About (for GitHub sidebar)
-
-A command‑line **preprocessor** for raw recordings before editing. Converts any format into clean **24‑bit mono WAV** with DC blocking, optional declip repair, and **true‑peak limiting** (−1..−6 dBFS) at 44.1/48 kHz—predictable, unclipped, **DAW‑ready** audio with atomic writes.
-
----
-
 ## License
 
 MIT © Seven Morris
