@@ -1,88 +1,98 @@
-# WaxOn (CLI)
+# WaxOn — Pre‑Edit Audio Preprocessor
 
-**Consistent, safe, and DAW‑ready audio.**
+Purpose: WaxOn prepares raw recordings for editing by rendering a clean, DAW‑ready 24‑bit mono WAV from any input. It applies a DC block, optional declip repair, resamples to 44.1 kHz or 48 kHz, and finishes with a true‑peak brickwall limiter (user‑selectable ceiling: −1 to −6 dBFS). No loudness normalization is performed in WaxOn.
 
-WaxOn converts mixed‑quality sources into 24‑bit **mono** WAV at **44.1 kHz** or **48 kHz**, applies a **gentle DC blocker** at the start of the chain, and performs **brick‑wall peak limiting with no makeup gain**. Output files are written atomically by rendering to a hidden temporary file and revealing the final file only after a successful render.
+> Use **WaxOff** after editing to set final program loudness and export deliverables.
 
 ---
 
 ## Features
 
-- **Mono from a single channel**: choose **Left** or **Right** (no summing).
-- **Sample‑rate conversion**: **44.1 kHz** or **48 kHz** via SOXR.
-- **Limiter‑only** workflow: set the ceiling (−1 to −6 dBFS).
-- Configurable **attack**/**release** (defaults 5/50 ms).
-- Optional **true‑peak style** oversampling path (×4 by default).
-- Optional **HP‑TPDF dither** on the final downsample.
-- **Atomic writes** using hidden dotfiles.
-- **Logging** to `~/Library/Logs/waxon_cli.log` (or a custom path).
+- DC blocker (gentle high‑pass; default 20 Hz)  
+- Optional clip repair (`adeclip`) in auto / on / off modes  
+- Limiter‑only final stage (attack/release, true‑peak oversampling)  
+- TP oversampling (×4 by default), optional triangular HP dither  
+- 24‑bit PCM mono (channel 0), 44.1 kHz (default) or 48 kHz  
+- Interactive prompts or fully scriptable via flags/env  
+- Atomic writes (hidden temp then reveal)  
+- Minimal dependencies: `bash`, `ffmpeg`
 
 ---
 
-## Install
+## Install (one‑liner)
 
-```bash
-./install.sh
+Installs to `~/WaxOn` and symlinks `waxon` into `~/bin` (or `~/.local/bin`):
+
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/sevmorris/WaxOn/main/install.sh)"
 ```
 
-Installs a `waxon` executable into `~/bin` (or `~/.local/bin`). Ensure that directory is on your `PATH`.
-
-Uninstall with:
-
-```bash
-./uninstall.sh
-```
+> Make sure your shell can find `~/bin`:  
+>  
+> ```sh
+> # zsh
+> echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc  
+> # bash (macOS / Linux)
+> echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bash_profile
+> ```
 
 ---
 
 ## Usage
 
-Interactive (prompts for sample rate, channel, limiter ceiling):
+### Interactive
 
-```bash
-waxon input1.wav input2.wav
+```sh
+waxon *.wav
 ```
 
-Non‑interactive examples:
+You’ll be prompted for:
 
-```bash
-waxon --no-prompt -s 48000 -c right -l -3 input.wav
+- Sample rate: 44.1 kHz or 48 kHz  
+- Limiter ceiling: −1..−6 dBFS  
+- Clip repair: auto / on / off  
+- Confirmation of full selections
 
-# or with environment variables
-PROMPT=0 SAMPLE_RATE=48000 CHANNEL=right LIMIT_DB=-3 waxon input.wav
+### Non‑interactive
+
+```sh
+# with flags
+waxon --no-prompt -s 48000 --limit-db -2.0 --clip-repair auto *.mp3
+
+# or via environment variables
+WAXON_PROMPT=0 SAMPLE_RATE=48000 LIMIT_DB=-2.0 CLIP_REPAIR=auto waxon *.mp3
 ```
 
-### Options
+#### Common flags
 
-```
---no-prompt               Run non‑interactively (or set PROMPT=0).
--s, --samplerate <Hz>     44100 or 48000.
--c, --channel <ch>        left | right | 0 | 1  (default: left).
--l, --limit <dB>          Limiter ceiling in dBFS (e.g., -1, -2, -3 ...).
---attack <ms>             Limiter attack (default 5).
---release <ms>            Limiter release (default 50).
---truepeak <0|1>          Enable oversampled path (default 1).
---oversample <N>          Oversample factor (default 4).
---dither <0|1>            TPDF‑HP dither on final render (default 1).
---dc <Hz>                 High‑pass cutoff for DC blocking (default 20).
--o, --outdir <dir>        Destination directory (default: alongside source).
---log <path>              Log path (default: ~/Library/Logs/waxon_cli.log).
--h, --help                Show help.
-```
-
-All options are also available as environment variables (`SAMPLE_RATE`, `CHANNEL`, `LIMIT_DB`, `TRUEPEAK`, `TP_OVERSAMPLE`, `DITHER`, `DC_BLOCK_HZ`, `OUTDIR`, `LOG`, etc.).
+- `-s, --samplerate <Hz>`: `44100` | `48000` (default: `44100`)  
+- `-l, --limit-db <dB>`: limiter ceiling (default `-1.0`; range `-1..-6`)  
+- `--truepeak <0|1>`: enable true‑peak oversampling (default `1`)  
+- `--tp-oversample <N>`: oversample factor (default `4`)  
+- `--dither <0|1>`: triangular HP dither on final resample (default `1`)  
+- `--clip-repair <mode>`: `auto` | `1` (on) | `0` (off) (default `auto`)  
+- `--clip-threshold <N>`: min clipped‑sample count to trigger in auto (default `1`)  
+- `--dc-block-hz <Hz>`: DC blocker high‑pass corner (default `20`)  
+- `--no-prompt`: skip interactive prompts  
+- `-q, --quiet`: less console output  
+- `-n, --dry-run`: show actions without writing  
 
 ---
 
-## Notes
+## Typical Workflow
 
-- The limiter **does not add makeup gain**; it only prevents peaks from exceeding the ceiling.
-- If your source is quiet, this process will **not** boost it.
-- Output files are **24‑bit WAV mono** at the selected sample rate.
+1. **WaxOn** → produce a safe, unclipped mono WAV for editing  
+2. Edit in your DAW (comp, cut, repair, mix)  
+3. **WaxOff** → set final program loudness, export deliverables  
 
 ---
 
-## Dependencies
+## License
 
-- **ffmpeg** and **ffprobe**
-- Standard POSIX tools (`bash`, `sed`, `awk`, `mktemp`)
+MIT © Seven Morris
+
+---
+
+## About
+
+WaxOn is a minimal, robust preprocessing tool to get your recordings into a clean, consistent starting point for editing.
