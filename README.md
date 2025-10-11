@@ -1,125 +1,99 @@
-# WaxOn — Dialogue / Voice Preprocessing Pipeline
+# WaxOn — Dialogue / Voice Preprocessing (Limiter‑Only CLI)
+**Version v1.0.3 (CLI)** · Consistent, safe, and DAW‑ready audio
 
-**Purpose:**  
-WaxOn prepares raw dialogue or voice tracks for mixing and editorial use. It ensures consistent, clean, and DAW‑ready audio without introducing any destructive processing. WaxOn is designed as a **pre‑mix prep tool**, not a final loudness normalizer.
+> This refactor aligns the **CLI** with the Automator droplet behavior: **no loudness normalization** and **no gain adjustments**. WaxOn now preserves program loudness and applies **only a brick‑wall limiter** at a user‑selected ceiling (no makeup gain).
 
----
+## What It Does
+WaxOn prepares raw recordings for editorial/mixing, without making creative level decisions. The chain is:
 
-## 🧩 What It Does
+1. **DC/infra‑DC block** (gentle high‑pass; default 20 Hz)  
+2. **Optional declip** (auto/force/off)  
+3. **Hygiene high‑pass** (~20 Hz)  
+4. **Mono selection** (channel 0)  
+5. **Resample** to 44.1 kHz or 48 kHz (SOXR)  
+6. **Brick‑wall limiter** at chosen ceiling (no makeup gain)  
+7. **True‑peak oversampling** (4× default)  
+8. **Final TPDF high‑pass dither**  
+9. **24‑bit PCM WAV** output with **atomic reveal**
 
-WaxOn applies a transparent preprocessing chain to each input file:
+**No LUFS targeting. No auto‑leveling.**
 
-1. **DC offset removal** — ensures zero‑centered waveform.
-2. **Clip repair** — optional interpolation for clipped samples.
-3. **Gain leveling** — normalize to target LUFS (default −25 LUFS).
-4. **Brick‑wall limiting** — safe peak control (default −1 dBTP).
-5. **Dithering** — optional, for 16/24‑bit consistency.
-6. **Mono conversion** — collapses to channel 0 (if desired).
-7. **Output formatting** — 24‑bit WAV, FLAC, etc., 44.1 kHz or 48 kHz.
+## Install
+Quick install to `~/bin/waxon` (symlink); clones repo into `~/WaxOn`:
 
-It **does not** perform compression, gating, EQ, or any tonal or dynamic enhancement. Its mission: *clean, safe, consistent* dialogue ready for editing.
-
----
-
-## ⚙️ Install
-
-Clones to your home directory and creates a symlink in `~/bin` (or `~/.local/bin`).
-
-### Quick Install
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/sevmorris/WaxOn/main/install.sh)"
+# or locally from this folder:
+./install.sh
 ```
 
-### Verify
+Verify:
 ```bash
 waxon -h
 ```
 
-If `~/bin` isn’t in your PATH:
+## Usage
+Basic:
 ```bash
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
+waxon input1.wav input2.aif
 ```
 
-### Uninstall (symlink only)
+Choose a limiter ceiling and sample rate (defaults: **−1.0 dBFS**, **48 kHz**):
 ```bash
-~/WaxOn/uninstall.sh
+waxon -l -2.0 -s 44100 *.wav
 ```
 
----
-
-## 🧰 Usage
-
-### Interactive Mode
+Non‑interactive (no prompts):
 ```bash
-waxon *.wav
-```
-Prompts for:
-- Target LUFS (default −25)
-- Sample rate (44.1 kHz or 48 kHz)
-- Output mode (WAV, FLAC, etc.)
-- Dither options
-
-### Non‑Interactive / Scriptable
-```bash
-waxon --no-prompt -t -25 -s 48000 -m wav *.aif
+waxon --no-prompt -l -3.0 -s 48000 *.wav
 ```
 
-Or via environment variables:
-```bash
-PROMPT=0 TARGET_I=-25 SAMPLE_RATE=48000 OUTMODE=wav waxon *.wav
+### Flags
+```
+-s, --samplerate <Hz>    44100 | 48000 (default: 48000)
+-l, --limit-db <dBFS>    Limiter ceiling (default: -1.0)
+--attack <ms>            Limiter attack (default: 5)
+--release <ms>           Limiter release (default: 50)
+--truepeak <0|1>         True-peak oversampling on/off (default: 1)
+--tp-oversample <N>      Oversampling factor (4 or 8; default: 4)
+--dither <0|1>           Final-stage TPDF HP dither on/off (default: 1)
+--clip-repair <mode>     auto | 1 (force) | 0 (off)  (default: auto)
+--clip-threshold <n>     Min clipped-sample count to enable declip (default: 1)
+--dc-block-hz <Hz>       DC/infra-DC high-pass corner (default: 20)
+--outdir <dir>           Output dir (default: alongside source; falls back to ~/Music/WaxOn then ~/Desktop)
+--suffix-base <tag>      Suffix token before limiter tag (default: "waxon")
+--log <path>             Log file (default: ~/Library/Logs/waxon_cli_v1.0.3.log)
+--no-prompt              Do not prompt when flags/env provide values
+-h, --help               Show help
 ```
 
-### Common Flags
+### Environment Variables
+All flags have env equivalents, e.g.:
 ```
--t, --target <LUFS>     Target loudness (default −25)
--s, --samplerate <Hz>   44100 or 48000
--m, --mode <mode>       wav | flac | both | all
--o, --output-dir <dir>  Destination directory
---no-prompt             Skip questions
---dither-depth <bits>   16 or 24
--l, --log <path>        Log path (default ~/Library/Logs/waxon_cli.log)
+LIMIT_DB=-2.0 SAMPLE_RATE=44100 TRUEPEAK=1 TP_OVERSAMPLE=8 DITHER=1 waxon *.wav
 ```
 
----
+## Output & Naming
+- **24‑bit WAV**, mono (channel 0), at **44.1 kHz** or **48 kHz**.  
+- Filenames include a rate token and limiter tag, e.g.:  
+  `take-48kwaxon--1dB.wav`, `voice-44kwaxon--6dB.wav`
 
-## 🧾 Behavior Summary
+## Workflow
+1. Run **WaxOn** to prep/limit for safe, unclipped import into the DAW.  
+2. Perform editing, EQ, dynamics, and mix decisions in the DAW.  
+3. Set distribution loudness later (e.g., with **WaxOff** at −18/−16 LUFS).
 
-| Step | Operation | Notes |
-|------|------------|-------|
-| 1 | DC Offset Removal | Always on |
-| 2 | Clip Repair | `auto` by default |
-| 3 | LUFS Normalization | −25 LUFS default |
-| 4 | Brick‑Wall Limiting | −1 dBTP ceiling |
-| 5 | Dithering | Optional |
-| 6 | Mono Conversion | Channel 0 |
-| 7 | Export | WAV/FLAC, 24‑bit, 44.1 kHz or 48 kHz |
+## Dependencies
+- macOS / bash, `ffmpeg` & `ffprobe` (Homebrew recommended)
+  ```bash
+  brew install ffmpeg
+  ```
 
----
+## Troubleshooting
+- **“ffmpeg not found”**: Add Homebrew bin dirs to your PATH or pass `FFMPEG_BIN` / `FFPROBE_BIN`.  
+- **No output**: Check permissions; tool falls back to `~/Music/WaxOn` then `~/Desktop`.  
+- **Limiter audible**: Try a higher ceiling (e.g., −2 dBFS) or adjust attack/release.  
+- **True-peak overs still clip?** Raise oversample from 4× to 8×.
 
-## 🧱 Dependencies
-
-- `bash`, `git`
-- `ffmpeg` (`brew install ffmpeg`)
-
----
-
-## 🔁 Typical Workflow
-
-1. Record voice or dialogue (Zoom, mic, etc.).  
-2. Run **WaxOn** → produces a clean, level, mono WAV.  
-3. Import into DAW for creative editing and mixing.  
-4. After final mix, run **WaxOff** to set broadcast LUFS (−18 / −16).
-
----
-
-## 🧩 Troubleshooting
-
-- **Too quiet/loud?** Input was already normalized; adjust target LUFS.  
-- **PATH not found?** Ensure `~/bin` or `~/.local/bin` is on your PATH.  
-- **Output clipping?** Check if input was hard‑limited; WaxOn will never boost past its true‑peak ceiling.  
-
----
-
-## 📄 License
-
-MIT License © Seven Morris
+## License
+MIT © Seven Morris
