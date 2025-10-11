@@ -1,27 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="${HOME}/WaxOn"
-BIN_DIR="${HOME}/bin"
-TARGET="${BIN_DIR}/waxon"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TARGET_DIR="$HOME/bin"
+[ -d "$HOME/.local/bin" ] && TARGET_DIR="$HOME/.local/bin"
 
-if [ ! -d "$REPO_DIR" ]; then
-  echo "Cloning into $REPO_DIR ..."
-  git clone https://github.com/sevmorris/WaxOn "$REPO_DIR" || {
-    echo "⚠️ Clone failed. If you're installing from a local folder, run ./install.sh from that folder."
-    REPO_DIR="$(pwd)"
-  }
+mkdir -p "$TARGET_DIR"
+if [ -f "$REPO_DIR/waxon" ]; then
+  install -m 0755 "$REPO_DIR/waxon" "$TARGET_DIR/waxon"
+else
+  echo "waxon not found at repo root." >&2
+  exit 1
 fi
-
-mkdir -p "$BIN_DIR"
-ln -sf "${REPO_DIR}/waxon" "$TARGET"
-chmod +x "${REPO_DIR}/waxon"
 
 if ! command -v waxon >/dev/null 2>&1; then
-  echo
-  echo "Add ~/bin to your PATH, e.g.:"
-  echo '  echo '\''export PATH="$HOME/bin:$PATH"'\'' >> ~/.zshrc && source ~/.zshrc'
+  echo "NOTE: Ensure $TARGET_DIR is on your PATH."
+  SHELL_RC="$HOME/.zshrc"
+  [ -n "${BASH_VERSION:-}" ] && SHELL_RC="$HOME/.bashrc"
+  echo 'export PATH="$HOME/bin:$PATH"' >> "$SHELL_RC"
+  echo "Added PATH hint to $SHELL_RC"
 fi
 
-echo "Installed: $TARGET"
+echo "Installed to: $TARGET_DIR/waxon"
 waxon -h || true
