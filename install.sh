@@ -1,25 +1,47 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# WaxOn installer (stdin-safe)
+set -Eeuo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_DIR="$HOME/bin"
-[ -d "$HOME/.local/bin" ] && TARGET_DIR="$HOME/.local/bin"
+REPO_URL="https://github.com/sevmorris/WaxOn.git"
+DEST="${HOME}/WaxOn"
+BIN_DIR="${HOME}/bin"
+ALT_BIN="${HOME}/.local/bin"
+LINK_NAME="waxon"
 
-mkdir -p "$TARGET_DIR"
-if [ -f "$REPO_DIR/waxon" ]; then
-  install -m 0755 "$REPO_DIR/waxon" "$TARGET_DIR/waxon"
+echo "==> Installing WaxOn to ${DEST} and symlinking ${LINK_NAME}..."
+
+# Ensure git and ffmpeg are present (soft check)
+command -v git >/dev/null 2>&1 || { echo "Error: git is required."; exit 1; }
+
+# Clone or update
+if [[ -d "${DEST}/.git" ]]; then
+  echo "==> Updating existing repo..."
+  git -C "${DEST}" pull --ff-only
 else
-  echo "waxon not found at repo root." >&2
+  echo "==> Cloning repo..."
+  git clone --depth=1 "${REPO_URL}" "${DEST}"
+fi
+
+# Verify the script exists
+if [[ ! -f "${DEST}/${LINK_NAME}" ]]; then
+  echo "Error: ${LINK_NAME} not found at ${DEST}/${LINK_NAME}"
   exit 1
 fi
 
-if ! command -v waxon >/dev/null 2>&1; then
-  echo "NOTE: Ensure $TARGET_DIR is on your PATH."
-  SHELL_RC="$HOME/.zshrc"
-  [ -n "${BASH_VERSION:-}" ] && SHELL_RC="$HOME/.bashrc"
-  echo 'export PATH="$HOME/bin:$PATH"' >> "$SHELL_RC"
-  echo "Added PATH hint to $SHELL_RC"
-fi
+# Make executable
+chmod +x "${DEST}/${LINK_NAME}"
 
-echo "Installed to: $TARGET_DIR/waxon"
-waxon -h || true
+# Choose a bin dir
+if [[ -d "${BIN_DIR}" || ! -d "${ALT_BIN}" ]]; then
+  INSTALL_BIN="${BIN_DIR}"
+else
+  INSTALL_BIN="${ALT_BIN}"
+fi
+mkdir -p "${INSTALL_BIN}"
+
+# Symlink
+ln -sf "${DEST}/${LINK_NAME}" "${INSTALL_BIN}/${LINK_NAME}"
+
+echo "==> Symlinked ${INSTALL_BIN}/${LINK_NAME}"
+echo "==> Ensure ${INSTALL_BIN} is on your PATH (e.g., echo 'export PATH=\"${INSTALL_BIN}:\$PATH\"' >> ~/.zshrc)"
+echo "==> Done."
