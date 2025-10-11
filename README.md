@@ -1,21 +1,8 @@
 # WaxOn — Pre‑Edit Audio Preprocessor
 
-Purpose: WaxOn prepares raw recordings for editing by rendering a clean, DAW‑ready 24‑bit mono WAV from any input. It applies a DC block, optional declip repair, resamples to 44.1 kHz or 48 kHz, and finishes with a true‑peak brickwall limiter (user‑selectable ceiling: −1 to −6 dBFS). No loudness normalization is performed in WaxOn.
+**Limiter‑only, no loudness normalization.** WaxOn prepares raw recordings for editing by rendering a clean, DAW‑ready 24‑bit mono WAV from any input. It applies a DC block, optional clip repair, resamples to 44.1 kHz or 48 kHz, and finishes with a brick‑wall peak limiter (user‑selectable ceiling −1 to −6 dBFS).
 
-> Use **WaxOff** after editing to set final program loudness and export deliverables.
-
----
-
-## Features
-
-- DC blocker (gentle high‑pass; default 20 Hz)  
-- Optional clip repair (`adeclip`) in auto / on / off modes  
-- Limiter‑only final stage (attack/release, true‑peak oversampling)  
-- TP oversampling (×4 by default), optional triangular HP dither  
-- 24‑bit PCM mono (channel 0), 44.1 kHz (default) or 48 kHz  
-- Interactive prompts or fully scriptable via flags/env  
-- Atomic writes (hidden temp then reveal)  
-- Minimal dependencies: `bash`, `ffmpeg`
+> Use **WaxOff** *after editing* to set final program loudness and export deliverables.
 
 ---
 
@@ -27,14 +14,19 @@ Installs to `~/WaxOn` and symlinks `waxon` into `~/bin` (or `~/.local/bin`):
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/sevmorris/WaxOn/main/install.sh)"
 ```
 
-> Make sure your shell can find `~/bin`:  
->  
-> ```sh
-> # zsh
-> echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc  
-> # bash (macOS / Linux)
-> echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bash_profile
-> ```
+If a proxy/CDN is serving a cached copy, try this cache‑busting variant:
+
+```sh
+/bin/bash -c "$(curl -fsSL "https://raw.githubusercontent.com/sevmorris/WaxOn/main/install.sh?nocache=$(date +%s)")"
+```
+
+Ensure your shell can find `~/bin` (or `~/.local/bin`):
+```sh
+# zsh
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc && exec zsh
+# bash
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bash_profile && source ~/.bash_profile
+```
 
 ---
 
@@ -45,37 +37,34 @@ Installs to `~/WaxOn` and symlinks `waxon` into `~/bin` (or `~/.local/bin`):
 ```sh
 waxon *.wav
 ```
-
 You’ll be prompted for:
-
-- Sample rate: 44.1 kHz or 48 kHz  
-- Limiter ceiling: −1..−6 dBFS  
-- Clip repair: auto / on / off  
-- Confirmation of full selections
+- Sample rate: 44.1 kHz or 48 kHz
+- Limiter ceiling: −1..−6 dBFS
+- Channel: Left or Right (mono render from that channel)
+- Clip repair: on / off
 
 ### Non‑interactive
 
 ```sh
-# with flags
-waxon --no-prompt -s 48000 --limit-db -2.0 --clip-repair auto *.mp3
+# flags
+waxon --no-prompt -s 48000 --limit-db -2.0 --channel L --clip-repair on *.mp3
 
-# or via environment variables
-WAXON_PROMPT=0 SAMPLE_RATE=48000 LIMIT_DB=-2.0 CLIP_REPAIR=auto waxon *.mp3
+# envs
+WAXON_PROMPT=0 SAMPLE_RATE=48000 LIMIT_DB=-2.0 CHANNEL=L CLIP_REPAIR=on waxon *.mp3
 ```
 
 #### Common flags
-
-- `-s, --samplerate <Hz>`: `44100` | `48000` (default: `44100`)  
-- `-l, --limit-db <dB>`: limiter ceiling (default `-1.0`; range `-1..-6`)  
-- `--truepeak <0|1>`: enable true‑peak oversampling (default `1`)  
-- `--tp-oversample <N>`: oversample factor (default `4`)  
-- `--dither <0|1>`: triangular HP dither on final resample (default `1`)  
-- `--clip-repair <mode>`: `auto` | `1` (on) | `0` (off) (default `auto`)  
-- `--clip-threshold <N>`: min clipped‑sample count to trigger in auto (default `1`)  
-- `--dc-block-hz <Hz>`: DC blocker high‑pass corner (default `20`)  
-- `--no-prompt`: skip interactive prompts  
-- `-q, --quiet`: less console output  
-- `-n, --dry-run`: show actions without writing  
+- `-s, --samplerate <Hz>`: `44100` | `48000` (default: `44100`)
+- `-l, --limit-db <dB>`: limiter ceiling (default `-1.0`; range `-1..-6`)
+- `-c, --channel <L|R>`: choose source channel for mono render (default `L`)
+- `--dc-block-hz <Hz>`: DC blocker high‑pass corner (default `20`)
+- `--clip-repair <on|off>`: enable/disable clip repair (default `off`)
+- `--dither <0|1>`: triangular HP dither on final resample (default `1`)
+- `--no-prompt`: skip interactive prompts
+- `-n, --dry-run`: show actions without writing
+- `-q, --quiet`: less console output
+- `-h, --help`: help
+- `--version`: print version
 
 ---
 
@@ -83,16 +72,18 @@ WAXON_PROMPT=0 SAMPLE_RATE=48000 LIMIT_DB=-2.0 CLIP_REPAIR=auto waxon *.mp3
 
 1. **WaxOn** → produce a safe, unclipped mono WAV for editing  
 2. Edit in your DAW (comp, cut, repair, mix)  
-3. **WaxOff** → set final program loudness, export deliverables  
+3. **WaxOff** → set final program loudness, export deliverables
+
+---
+
+## Troubleshooting
+
+- **`BASH_SOURCE[0]: unbound variable`** — You pulled a cached installer. Re‑run the cache‑busting one‑liner above.
+- **`waxon` not found** — Add `~/bin` (or `~/.local/bin`) to your PATH (see Install section).
+- **`ffmpeg: command not found`** — Install ffmpeg first (macOS: `brew install ffmpeg`).
 
 ---
 
 ## License
 
 MIT © Seven Morris
-
----
-
-## About
-
-WaxOn is a minimal, robust preprocessing tool to get your recordings into a clean, consistent starting point for editing.
