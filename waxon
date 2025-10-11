@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# WaxOn — Limiter‑Only CLI (aligns with Automator droplet)
+# WaxOn — Limiter-Only CLI (aligns with Automator droplet)
 # v1.0.3
-# Pipeline: DC block → (optional) declip → hygiene HPF → mono ch0 → resample → true‑peak‑safe limiter → dither → 24‑bit WAV
+# Pipeline: DC block → (optional) declip → hygiene HPF → mono ch0 → resample → true-peak-safe limiter → dither → 24-bit WAV
 # No loudness normalization. No makeup gain.
 #
 # Naming: <stem>-<44k|48k><SUFFIX_BASE>-<LIMIT_TAG>.wav  e.g. my_take-48kwaxon--1dB.wav
@@ -18,7 +18,7 @@ PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"; exp
 
 VERSION="v1.0.3"
 APP_NAME="WaxOn"
-APP_TITLE="${APP_NAME} ${VERSION} — Limiter‑Only CLI"
+APP_TITLE="${APP_NAME} ${VERSION} — Limiter-Only CLI"
 
 # Defaults (env overridable)
 SAMPLE_RATE="${SAMPLE_RATE:-48000}"           # 44100 | 48000
@@ -27,12 +27,12 @@ ATTACK_MS="${ATTACK_MS:-5}"
 RELEASE_MS="${RELEASE_MS:-50}"
 TRUEPEAK="${TRUEPEAK:-1}"                     # 1|0
 TP_OVERSAMPLE="${TP_OVERSAMPLE:-4}"           # 4|8
-DITHER="${DITHER:-1}"                         
+DITHER="${DITHER:-1}"
 CLIP_REPAIR="${CLIP_REPAIR:-auto}"            # auto|1|0
 CLIP_THRESHOLD="${CLIP_THRESHOLD:-1}"         # min clipped-sample count to enable auto declip
 DC_BLOCK_HZ="${DC_BLOCK_HZ:-20}"              # gentle HPF at start
 SUFFIX_BASE="${SUFFIX_BASE:-waxon}"
-PROMPT="${PROMPT:-1}"                         # 1=prompt when values missing; 0=no prompt
+PROMPT="${PROMPT:-1}"                         # 1=prompt; 0=no prompt
 LOG="${LOG:-${HOME}/Library/Logs/waxon_cli_${VERSION}.log}"
 
 FFMPEG_BIN="${FFMPEG_BIN:-$(command -v ffmpeg || true)}"
@@ -77,7 +77,6 @@ USAGE
 # --- Parse args ---
 OUTDIR=""
 NO_PROMPT=0
-
 args=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -99,8 +98,7 @@ while [ $# -gt 0 ]; do
     -*)
       echo "Unknown option: $1" >&2
       usage; exit 1 ;;
-    *)
-      args+=("$1"); shift ;;
+    *) args+=("$1"); shift ;;
   esac
 done
 set -- "${args[@]}"
@@ -109,33 +107,48 @@ set -- "${args[@]}"
 [ -n "$FFMPEG_BIN" ] || { echo "FFmpeg not found. Install with: brew install ffmpeg"; exit 1; }
 [ -n "$FFPROBE_BIN" ] || { echo "ffprobe not found. Reinstall FFmpeg."; exit 1; }
 
-# --- Interactive prompts if allowed and values look missing/invalid ---
+# --- ALWAYS-PROMPT MODE (like droplet) ---
 if [ "$PROMPT" = "1" ] && [ "$NO_PROMPT" -eq 0 ]; then
-  # Sample rate validation
-  case "$SAMPLE_RATE" in
-    44100|48000) ;;
-    *)
-      echo "Choose sample rate: [1] 44.1 kHz  [2] 48 kHz (default 48)"
-      read -r -p "> " choice
-      if [ "$choice" = "1" ]; then SAMPLE_RATE=44100; else SAMPLE_RATE=48000; fi
-      ;;
+  # Sample rate prompt (default = current SAMPLE_RATE)
+  def_sr_idx=2; def_sr_label="48 kHz"
+  if [ "$SAMPLE_RATE" = "44100" ]; then def_sr_idx=1; def_sr_label="44.1 kHz"; fi
+  echo "Select output sample rate:"
+  echo "  [1] 44.1 kHz"
+  echo "  [2] 48 kHz"
+  read -r -p "Choice [${def_sr_idx} = ${def_sr_label}]: " choice_sr
+  case "${choice_sr:-$def_sr_idx}" in
+    1) SAMPLE_RATE=44100 ;;
+    2) SAMPLE_RATE=48000 ;;
+    *) SAMPLE_RATE=48000 ;;
   esac
 
-  # Limiter ceiling
+  # Limiter ceiling prompt (default = current LIMIT_DB)
+  # Map default to index 1..6
   case "$LIMIT_DB" in
-    -1.0|-2.0|-3.0|-4.0|-5.0|-6.0) ;;
-    *)
-      echo "Select limiter ceiling (dBFS): [1] -1  [2] -2  [3] -3  [4] -4  [5] -5  [6] -6 (default -1)"
-      read -r -p "> " idx
-      case "$idx" in
-        2) LIMIT_DB="-2.0" ;;
-        3) LIMIT_DB="-3.0" ;;
-        4) LIMIT_DB="-4.0" ;;
-        5) LIMIT_DB="-5.0" ;;
-        6) LIMIT_DB="-6.0" ;;
-        *) LIMIT_DB="-1.0" ;;
-      esac
-      ;;
+    -1.0) def_idx=1 ;;
+    -2.0) def_idx=2 ;;
+    -3.0) def_idx=3 ;;
+    -4.0) def_idx=4 ;;
+    -5.0) def_idx=5 ;;
+    -6.0) def_idx=6 ;;
+    *) def_idx=1 ; LIMIT_DB="-1.0" ;;
+  esac
+  echo "Select limiter ceiling (dBFS):"
+  echo "  [1] -1 dB"
+  echo "  [2] -2 dB"
+  echo "  [3] -3 dB"
+  echo "  [4] -4 dB"
+  echo "  [5] -5 dB"
+  echo "  [6] -6 dB"
+  read -r -p "Choice [${def_idx} = ${LIMIT_DB} dBFS]: " choice_lim
+  case "${choice_lim:-$def_idx}" in
+    1) LIMIT_DB="-1.0" ;;
+    2) LIMIT_DB="-2.0" ;;
+    3) LIMIT_DB="-3.0" ;;
+    4) LIMIT_DB="-4.0" ;;
+    5) LIMIT_DB="-5.0" ;;
+    6) LIMIT_DB="-6.0" ;;
+    *) LIMIT_DB="-1.0" ;;
   esac
 fi
 
@@ -205,9 +218,6 @@ for in_path in "$@"; do
   if [ "$TRUEPEAK" = "1" ]; then
     oversample=$(( SAMPLE_RATE * TP_OVERSAMPLE ))
     if [ "$DITHER" = "1" ]; then
-      af="${lim},aresample=${SAMPLE_RATE}:resampler=soxr:dither_method=triangular_hp"
-      af_pre="aresample=${oversample}:resampler=soxr,${lim},aresample=${SAMPLE_RATE}:resampler=soxr"
-      # We'll synthesize full chain: step1 -> oversample -> limit -> downsample (+dither)
       final_af="${step1_af},aresample=${oversample}:resampler=soxr,${lim},aresample=${SAMPLE_RATE}:resampler=soxr:dither_method=triangular_hp"
     else
       final_af="${step1_af},aresample=${oversample}:resampler=soxr,${lim},aresample=${SAMPLE_RATE}:resampler=soxr"
