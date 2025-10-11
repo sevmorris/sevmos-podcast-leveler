@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # WaxOn — Limiter-Only CLI (aligns with Automator droplet)
-# v1.0.3
-# Pipeline: DC block → (optional) declip → hygiene HPF → mono ch0 → resample → true-peak-safe limiter → dither → 24-bit WAV
-# No loudness normalization. No makeup gain.
+# VERSION v1.0.6
 #
-# Naming: <stem>-<44k|48k><SUFFIX_BASE>-<LIMIT_TAG>.wav  e.g. my_take-48kwaxon--1dB.wav
+# Chain:
+#   DC block (HPF @ DC_BLOCK_HZ) → optional declip (auto/force/off)
+#   → 20 Hz HPF → mono ch0 → resample (44.1k or 48k)
+#   → brickwall limiter @ LIMIT_DB (optionally true-peak oversampled)
+#   → optional triangular HP dither on final stage
+#
+# Notes:
+#   • Limiter-only by design (no loudness normalization).
+#   • Hidden temp write; atomic reveal.
 
 set -u
 set +e
@@ -14,40 +20,119 @@ LC_ALL="${LC_ALL:-en_US.UTF-8}"
 LANG="${LANG:-en_US.UTF-8}"
 export LC_ALL LANG
 
+# ------------------------------------------------------------------------------
+# Defaults (env-overridable)
+# ------------------------------------------------------------------------------
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"; export PATH
 
-VERSION="v1.0.3"
+VERSION="v1.0.6"
 APP_NAME="WaxOn"
 APP_TITLE="${APP_NAME} ${VERSION} — Limiter-Only CLI"
 
-# Defaults (env overridable)
-SAMPLE_RATE="${SAMPLE_RATE:-48000}"           # 44100 | 48000
-LIMIT_DB="${LIMIT_DB:--1.0}"                  # limiter ceiling (dBFS)
+SAMPLE_RATE="${SAMPLE_RATE:-44100}"           # 44100 | 48000 (default now 44.1k)
+LIMIT_DB="${LIMIT_DB:--1.0}"                  # e.g. -1.0 .. -6.0
 ATTACK_MS="${ATTACK_MS:-5}"
 RELEASE_MS="${RELEASE_MS:-50}"
+
 TRUEPEAK="${TRUEPEAK:-1}"                     # 1|0
 TP_OVERSAMPLE="${TP_OVERSAMPLE:-4}"           # 4|8
-DITHER="${DITHER:-1}"
+DITHER="${DITHER:-1}"                         # 1|0
+
 CLIP_REPAIR="${CLIP_REPAIR:-auto}"            # auto|1|0
-CLIP_THRESHOLD="${CLIP_THRESHOLD:-1}"         # min clipped-sample count to enable auto declip
-DC_BLOCK_HZ="${DC_BLOCK_HZ:-20}"              # gentle HPF at start
+CLIP_THRESHOLD="${CLIP_THRESHOLD:-1}"
+
+DC_BLOCK_HZ="${DC_BLOCK_HZ:-20}"
+
 SUFFIX_BASE="${SUFFIX_BASE:-waxon}"
-PROMPT="${PROMPT:-1}"                         # 1=prompt; 0=no prompt
+WAXON_PROMPT="${WAXON_PROMPT:-1}"             # 1=prompt (default), 0=noninteractive
+OUTDIR="${OUTDIR:-}"
+
 LOG="${LOG:-${HOME}/Library/Logs/waxon_cli_${VERSION}.log}"
 
 FFMPEG_BIN="${FFMPEG_BIN:-$(command -v ffmpeg || true)}"
 FFPROBE_BIN="${FFPROBE_BIN:-$(command -v ffprobe || true)}"
 
-# --- Logging ---
+# ------------------------------------------------------------------------------
+# Logging (tee to console + file; keep it minimal)
+# ------------------------------------------------------------------------------
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
-exec >>"$LOG" 2>&1
+exec > >(tee -a "$LOG") 2>&1
 echo "======== $(date '+%Y-%m-%d %H:%M:%S') — Start run ========"
 echo "App: ${APP_TITLE}"
-echo "Args: $*"
-command -v ffmpeg  && ffmpeg -version  | head -n1
-command -v ffprobe && ffprobe -version | head -n1
+printf "Args (%d):\n" "$#"; for a in "$@"; do echo "  - $a"; done
+ffver="$("$FFMPEG_BIN" -version 2>/dev/null | head -n1)"; [ -n "$ffver" ] && echo "$ffver" || true
 
-# --- Help ---
+# ------------------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------------------
+die() { echo "FATAL: $*"; exit 1; }
+warn(){ echo "WARN:  $*"; }
+is_num(){ [[ "$1" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; }
+to_amp(){ awk -v db="$1" 'BEGIN{print exp((db/20.0)*log(10))}'; }
+strip_trailing_zero(){ printf "%s" "$1" | sed 's/\(\.[0-9]*[1-9]\)0\+$//; s/\.0$//'; }
+hidden_tmp(){ local dir="$1" base="$2" ext="$3"; echo "${dir}/.${base}.part.$$.$RANDOM.${ext}"; }
+
+detect_clipped_samples() {
+  local in_file="$1"
+  "$FFMPEG_BIN" -nostdin -hide_banner -v error -i "$in_file" \
+    -af "astats=metadata=1:reset=0" -f null - 2>&1 \
+  | awk 'BEGIN{sum=0} /clipped[[:space:]]+samples/i{for(i=1;i<=NF;i++)if($i~/^[0-9]+$/)sum+=$i} END{if(sum=="")sum=0; print sum}'
+}
+
+ffprobe_duration_s() {
+  [ -x "$FFPROBE_BIN" ] || { echo 0; return; }
+  local dur
+  dur="$("$FFPROBE_BIN" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | head -n1)"
+  [ -n "$dur" ] && echo "$dur" || echo 0
+}
+
+# Progress bar to TTY
+TTY_OUT="/dev/tty"; [ -w "$TTY_OUT" ] || TTY_OUT="/dev/null"
+progress_draw() {  # $1=label  $2=pct
+  local label="$1" pct="$2" width=28 fill pad
+  (( pct < 0 )) && pct=0; (( pct > 100 )) && pct=100
+  fill=$(( (pct*width)/100 ))
+  pad=$(( width - fill ))
+  printf "\r%-12s [" "$label" >"$TTY_OUT"
+  printf "%${fill}s" "" | tr ' ' '#' >"$TTY_OUT"
+  printf "%${pad}s" ""  >"$TTY_OUT"
+  printf "] %3d%%" "$pct" >"$TTY_OUT"
+}
+
+ffmpeg_with_progress() {
+  # $1=duration_seconds, $2=label, rest=ffmpeg args
+  local dur_s="$1" label="$2"; shift 2
+  local pipe; pipe="$(mktemp -u)"; mkfifo "$pipe"
+  (
+    local total_us cur_us pct k v
+    total_us=$(awk -v d="$dur_s" 'BEGIN{printf "%.0f", d*1000000}')
+    [ -z "$total_us" ] && total_us=1
+    while IFS='=' read -r k v; do
+      case "$k" in
+        out_time_us) cur_us="${v%.*}";;
+        out_time_ms) cur_us=$(( ${v%.*} * 1000 ));;
+        progress) [ "$v" = "end" ] && break; continue;;
+        *) continue;;
+      esac
+      [ -z "$cur_us" ] && cur_us=0
+      pct=$(( cur_us * 100 / (total_us>0?total_us:1) ))
+      (( pct>100 )) && pct=100
+      progress_draw "$label" "$pct"
+    done <"$pipe"
+    progress_draw "$label" 100; printf "\n" >"$TTY_OUT"
+  ) &
+  local reader_pid=$!
+  "$FFMPEG_BIN" -nostdin -hide_banner -loglevel error -stats_period 0.5 \
+    -progress "$pipe" "$@" 2>/dev/null
+  local rc=$?
+  kill "$reader_pid" >/dev/null 2>&1 || true
+  rm -f "$pipe"
+  return $rc
+}
+
+# ------------------------------------------------------------------------------
+# Usage
+# ------------------------------------------------------------------------------
 usage() {
 cat <<USAGE
 ${APP_TITLE}
@@ -59,80 +144,68 @@ Options:
   -l, --limit-db <dBFS>    Limiter ceiling (default: ${LIMIT_DB})
       --attack <ms>        Limiter attack (default: ${ATTACK_MS})
       --release <ms>       Limiter release (default: ${RELEASE_MS})
-      --truepeak <0|1>     True-peak oversampling on/off (default: ${TRUEPEAK})
-      --tp-oversample <N>  Oversampling factor 4 or 8 (default: ${TP_OVERSAMPLE})
-      --dither <0|1>       Final-stage TPDF HP dither (default: ${DITHER})
-      --clip-repair <m>    auto | 1 (force) | 0 (off) (default: ${CLIP_REPAIR})
+      --truepeak <0|1>     True-peak oversampling (default: ${TRUEPEAK})
+      --tp-oversample <N>  Limiter oversample factor 4 or 8 (default: ${TP_OVERSAMPLE})
+      --dither <0|1>       Final-stage triangular HP dither (default: ${DITHER})
+      --clip-repair <m>    auto | 1 (force) | 0 (off)  (default: ${CLIP_REPAIR})
       --clip-threshold <n> Min clipped-sample count to enable declip (default: ${CLIP_THRESHOLD})
       --dc-block-hz <Hz>   DC/infra-DC HP corner (default: ${DC_BLOCK_HZ})
-      --outdir <dir>       Output directory (default: alongside source; fallback Music/WaxOn, Desktop)
+      --outdir <dir>       Output directory (default: alongside source; fallback Music/WaxOn → Desktop)
       --suffix-base <tag>  Suffix token (default: ${SUFFIX_BASE})
-      --no-prompt          Non-interactive (PROMPT=0)
+      --prompt             Force prompts (same as WAXON_PROMPT=1)
+      --no-prompt          Suppress prompts (same as WAXON_PROMPT=0)
   -h, --help               Show this help
-
-Environment variables mirror flags (e.g., LIMIT_DB, SAMPLE_RATE, TRUEPEAK, TP_OVERSAMPLE, DITHER, PROMPT, LOG).
 USAGE
 }
 
-# --- Parse args ---
-OUTDIR=""
-NO_PROMPT=0
+# ------------------------------------------------------------------------------
+# Parse args
+# ------------------------------------------------------------------------------
 args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     -s|--samplerate) SAMPLE_RATE="$2"; shift 2 ;;
-    -l|--limit-db) LIMIT_DB="$2"; shift 2 ;;
-    --attack) ATTACK_MS="$2"; shift 2 ;;
-    --release) RELEASE_MS="$2"; shift 2 ;;
-    --truepeak) TRUEPEAK="$2"; shift 2 ;;
+    -l|--limit-db)   LIMIT_DB="$2"; shift 2 ;;
+    --attack)        ATTACK_MS="$2"; shift 2 ;;
+    --release)       RELEASE_MS="$2"; shift 2 ;;
+    --truepeak)      TRUEPEAK="$2"; shift 2 ;;
     --tp-oversample) TP_OVERSAMPLE="$2"; shift 2 ;;
-    --dither) DITHER="$2"; shift 2 ;;
-    --clip-repair) CLIP_REPAIR="$2"; shift 2 ;;
-    --clip-threshold) CLIP_THRESHOLD="$2"; shift 2 ;;
-    --dc-block-hz) DC_BLOCK_HZ="$2"; shift 2 ;;
-    --outdir) OUTDIR="$2"; shift 2 ;;
-    --suffix-base) SUFFIX_BASE="$2"; shift 2 ;;
-    --no-prompt) NO_PROMPT=1; PROMPT=0; shift ;;
+    --dither)        DITHER="$2"; shift 2 ;;
+    --clip-repair)   CLIP_REPAIR="$2"; shift 2 ;;
+    --clip-threshold)CLIP_THRESHOLD="$2"; shift 2 ;;
+    --dc-block-hz)   DC_BLOCK_HZ="$2"; shift 2 ;;
+    --outdir)        OUTDIR="$2"; shift 2 ;;
+    --suffix-base)   SUFFIX_BASE="$2"; shift 2 ;;
+    --no-prompt)     WAXON_PROMPT=0; shift ;;
+    --prompt)        WAXON_PROMPT=1; shift ;;
     --) shift; break ;;
-    -*)
-      echo "Unknown option: $1" >&2
-      usage; exit 1 ;;
+    -*) die "Unknown option: $1" ;;
     *) args+=("$1"); shift ;;
   esac
 done
 set -- "${args[@]}"
 
+[ -n "${FFMPEG_BIN}" ]  || die "FFmpeg not found. Install with: brew install ffmpeg"
+[ -n "${FFPROBE_BIN}" ] || die "ffprobe not found. Reinstall FFmpeg."
 [ $# -ge 1 ] || { usage; exit 0; }
-[ -n "$FFMPEG_BIN" ] || { echo "FFmpeg not found. Install with: brew install ffmpeg"; exit 1; }
-[ -n "$FFPROBE_BIN" ] || { echo "ffprobe not found. Reinstall FFmpeg."; exit 1; }
 
-# --- ALWAYS-PROMPT MODE (like droplet) ---
-if [ "$PROMPT" = "1" ] && [ "$NO_PROMPT" -eq 0 ]; then
-  # Sample rate prompt (default = current SAMPLE_RATE)
-  def_sr_idx=2; def_sr_label="48 kHz"
-  if [ "$SAMPLE_RATE" = "44100" ]; then def_sr_idx=1; def_sr_label="44.1 kHz"; fi
+# ------------------------------------------------------------------------------
+# Prompts — always when WAXON_PROMPT=1
+# ------------------------------------------------------------------------------
+prompt_sr() {
   echo "Select output sample rate:"
   echo "  [1] 44.1 kHz"
   echo "  [2] 48 kHz"
-  read -r -p "Choice [${def_sr_idx} = ${def_sr_label}]: " choice_sr
-  case "${choice_sr:-$def_sr_idx}" in
+  local def_idx=1; [ "$SAMPLE_RATE" = "48000" ] && def_idx=2
+  read -r -p "Choice [${def_idx}]: " choice_sr
+  case "${choice_sr:-$def_idx}" in
     1) SAMPLE_RATE=44100 ;;
     2) SAMPLE_RATE=48000 ;;
-    *) SAMPLE_RATE=48000 ;;
+    *) : ;;  # keep current
   esac
-
-  # Limiter ceiling prompt (default = current LIMIT_DB)
-  # Map default to index 1..6
-  case "$LIMIT_DB" in
-    -1.0) def_idx=1 ;;
-    -2.0) def_idx=2 ;;
-    -3.0) def_idx=3 ;;
-    -4.0) def_idx=4 ;;
-    -5.0) def_idx=5 ;;
-    -6.0) def_idx=6 ;;
-    *) def_idx=1 ; LIMIT_DB="-1.0" ;;
-  esac
+}
+prompt_limit() {
   echo "Select limiter ceiling (dBFS):"
   echo "  [1] -1 dB"
   echo "  [2] -2 dB"
@@ -140,81 +213,103 @@ if [ "$PROMPT" = "1" ] && [ "$NO_PROMPT" -eq 0 ]; then
   echo "  [4] -4 dB"
   echo "  [5] -5 dB"
   echo "  [6] -6 dB"
-  read -r -p "Choice [${def_idx} = ${LIMIT_DB} dBFS]: " choice_lim
-  case "${choice_lim:-$def_idx}" in
-    1) LIMIT_DB="-1.0" ;;
-    2) LIMIT_DB="-2.0" ;;
-    3) LIMIT_DB="-3.0" ;;
-    4) LIMIT_DB="-4.0" ;;
-    5) LIMIT_DB="-5.0" ;;
-    6) LIMIT_DB="-6.0" ;;
-    *) LIMIT_DB="-1.0" ;;
+  local map=("-1.0" "-2.0" "-3.0" "-4.0" "-5.0" "-6.0")
+  local def_idx=1
+  case "$LIMIT_DB" in
+    -1.0) def_idx=1 ;; -2.0) def_idx=2 ;; -3.0) def_idx=3 ;;
+    -4.0) def_idx=4 ;; -5.0) def_idx=5 ;; -6.0) def_idx=6 ;;
   esac
+  read -r -p "Choice [${def_idx}]: " choice_lim
+  case "${choice_lim:-$def_idx}" in
+    1|2|3|4|5|6) idx=$(( ${choice_lim:-$def_idx} - 1 )); LIMIT_DB="${map[$idx]}" ;;
+    *) : ;;
+  esac
+}
+prompt_confirm() {
+  echo
+  echo "Selections:"
+  echo "  Sample rate: ${SAMPLE_RATE} Hz"
+  echo "  Limit dBFS:  ${LIMIT_DB}"
+  echo "  True-peak:   ${TRUEPEAK} (×${TP_OVERSAMPLE})  Dither: ${DITHER}"
+  echo "  Clip repair: ${CLIP_REPAIR} (threshold ${CLIP_THRESHOLD})"
+  echo "  DC block:    ${DC_BLOCK_HZ} Hz"
+  read -r -p "Proceed? [Y/n]: " yn; case "${yn:-Y}" in Y|y) : ;; *) echo "Cancelled."; exit 0 ;; esac
+}
+
+if [ "${WAXON_PROMPT}" = "1" ]; then
+  prompt_sr
+  prompt_limit
+  prompt_confirm
 fi
 
-# --- Helpers ---
-to_amp() { awk -v db="$1" 'BEGIN{print exp((db/20.0)*log(10))}'; }
-strip_trailing_zero() { printf "%s" "$1" | sed 's/\(\.[0-9]*[1-9]\)0\+$//; s/\.0$//'; }
+# ------------------------------------------------------------------------------
+# Validate
+# ------------------------------------------------------------------------------
+case "$SAMPLE_RATE" in 44100|48000) ;; *) die "Invalid SAMPLE_RATE: $SAMPLE_RATE" ;; esac
+is_num "$LIMIT_DB" || die "Invalid LIMIT_DB: $LIMIT_DB"
+case "$TRUEPEAK" in 0|1) ;; *) die "TRUEPEAK must be 0 or 1";; esac
+case "$TP_OVERSAMPLE" in 4|8) ;; *) die "TP_OVERSAMPLE must be 4 or 8";; esac
+case "$DITHER" in 0|1) ;; *) die "DITHER must be 0 or 1";; esac
+case "$CLIP_REPAIR" in auto|0|1) ;; *) die "CLIP_REPAIR must be auto|0|1";; esac
+is_num "$CLIP_THRESHOLD" || die "CLIP_THRESHOLD must be numeric"
+is_num "$DC_BLOCK_HZ" || die "DC_BLOCK_HZ must be numeric"
 
+# ------------------------------------------------------------------------------
+# Build tags
+# ------------------------------------------------------------------------------
 limit_amp="$(to_amp "$LIMIT_DB")"
 LIMIT_DB_CLEAN="$(strip_trailing_zero "$LIMIT_DB")"
 LIMIT_TAG="${LIMIT_DB_CLEAN}dB"
+RATE_TAG=$([ "$SAMPLE_RATE" = "44100" ] && echo "44k" || echo "48k")
+SUFFIX="${RATE_TAG}-${SUFFIX_BASE}"
 
-# --- Clipped-sample detector ---
-detect_clipped_samples() {
-  local in_file="$1"
-  "$FFMPEG_BIN" -nostdin -hide_banner -v error -i "$in_file" \
-    -af "astats=metadata=1:reset=0" -f null - 2>&1 \
-  | awk 'BEGIN{sum=0} /clipped[[:space:]]+samples/i{for(i=1;i<=NF;i++)if($i~/^[0-9]+$/)sum+=$i} END{if(sum=="")sum=0; print sum}'
-}
+echo "Selections: sr=${SAMPLE_RATE} | limit=${LIMIT_DB} dBFS | tp=${TRUEPEAK}x${TP_OVERSAMPLE} | dither=${DITHER} | clip=${CLIP_REPAIR}/${CLIP_THRESHOLD} | dc=${DC_BLOCK_HZ}"
 
-# --- Process ---
+# ------------------------------------------------------------------------------
+# Process
+# ------------------------------------------------------------------------------
 success_n=0
 fail_n=0
+TMP_CREATED=()
+cleanup(){ for f in "${TMP_CREATED[@]:-}"; do [ -e "$f" ] && rm -f "$f"; done; }
+trap cleanup EXIT INT TERM
 
 for in_path in "$@"; do
-  echo "--- Processing: $in_path"
-  if [ ! -f "$in_path" ]; then echo "Skip (not a file): $in_path"; continue; fi
+  echo "--> Processing: $in_path"
+  if [ ! -f "$in_path" ]; then warn "Skip (not a file): $in_path"; continue; fi
 
-  dir="$(cd "$(dirname "$in_path")" && pwd -P)"
+  src_dir="$(cd "$(dirname "$in_path")" && pwd -P)"
   base="$(basename "$in_path")"
   stem="${base%.*}"
 
-  # Output directory
-  outdir="$dir"
-  if [ -n "$OUTDIR" ]; then outdir="$OUTDIR"; fi
-  if [ ! -w "$outdir" ]; then
-    outdir="${HOME}/Music/WaxOn"; mkdir -p "$outdir" || outdir="${HOME}/Desktop"
+  dest_dir="${OUTDIR:-$src_dir}"
+  if [ ! -w "$dest_dir" ]; then
+    dest_dir="${HOME}/Music/WaxOn"
+    mkdir -p "$dest_dir" 2>/dev/null || dest_dir="${HOME}/Desktop"
   fi
 
-  # Rate tag
-  case "$SAMPLE_RATE" in
-    44100) RATE_TAG="44k" ;;
-    48000) RATE_TAG="48k" ;;
-    *) echo "Invalid sample rate: $SAMPLE_RATE"; fail_n=$((fail_n+1)); continue ;;
-  esac
+  out_path="${dest_dir}/${stem}-${SUFFIX}-${LIMIT_TAG}.wav"
+  tmp_path="$(hidden_tmp "$dest_dir" "${stem}-${SUFFIX}-${LIMIT_TAG}" "wav")"
+  TMP_CREATED+=("$tmp_path")
 
-  out_path="${outdir}/${stem}-${RATE_TAG}${SUFFIX_BASE}-${LIMIT_TAG}.wav"
-  tmp_path="${outdir}/.${stem}-${RATE_TAG}${SUFFIX_BASE}-${LIMIT_TAG}.wav.tmp"
-
-  # Auto declip decision
+  # Decide clip repair
   apply_declip="0"
   case "$CLIP_REPAIR" in
     1) apply_declip="1" ;;
     0) apply_declip="0" ;;
-    *)
+    auto)
       clips="$(detect_clipped_samples "$in_path")"
-      if [ "$clips" -ge "$CLIP_THRESHOLD" ]; then apply_declip="1"; fi
+      [ "${clips:-0}" -ge "$CLIP_THRESHOLD" ] && apply_declip="1"
       ;;
   esac
 
-  # Build AF chains
+  # Chain: DC block -> (optional) declip -> 20 Hz HPF -> mono ch0 -> resample
   step1_af="highpass=f=${DC_BLOCK_HZ}"
   [ "$apply_declip" = "1" ] && step1_af="${step1_af},adeclip"
   step1_af="${step1_af},highpass=f=20,pan=1c|c0=c0,aresample=${SAMPLE_RATE}:resampler=soxr"
 
+  # Limiter (with optional TP oversampling/dither)
   lim="alimiter=limit=${limit_amp}:attack=${ATTACK_MS}:release=${RELEASE_MS}:level=disabled"
-
   if [ "$TRUEPEAK" = "1" ]; then
     oversample=$(( SAMPLE_RATE * TP_OVERSAMPLE ))
     if [ "$DITHER" = "1" ]; then
@@ -230,24 +325,28 @@ for in_path in "$@"; do
     fi
   fi
 
-  # Render to hidden temp
-  if "$FFMPEG_BIN" -nostdin -hide_banner -loglevel error -y \
-       -i "$in_path" -af "$final_af" \
+  # Render → hidden temp (with progress), then reveal
+  dur="$(ffprobe_duration_s "$in_path")"
+  if ffmpeg_with_progress "$dur" "render" \
+       -y -i "$in_path" -af "$final_af" \
        -c:a pcm_s24le -ar ${SAMPLE_RATE} -ac 1 \
        -f wav "$tmp_path"
   then
-    # Reveal atomically
-    if mv -f "$tmp_path" "$out_path" 2>/dev/null; then : ; else
-      cp -f "$tmp_path" "$out_path" && rm -f "$tmp_path" 2>/dev/null || true
+    if mv -f "$tmp_path" "$out_path" 2>/dev/null; then :; else
+      warn "mv failed — attempting cp fallback"
+      if cp -f "$tmp_path" "$out_path"; then rm -f "$tmp_path" 2>/dev/null || true; else warn "Both mv and cp failed: $out_path"; fi
     fi
 
     if [ -s "$out_path" ]; then
-      echo "✅ Done -> $out_path"; success_n=$((success_n+1))
+      echo "✅ Done → $out_path"
+      success_n=$((success_n+1))
     else
-      echo "❌ Post-reveal check failed: $out_path"; fail_n=$((fail_n+1))
+      warn "Post-reveal check failed — file not found or empty: $out_path"
+      fail_n=$((fail_n+1))
     fi
   else
-    echo "❌ Render failed for: $in_path"; fail_n=$((fail_n+1))
+    warn "Render failed: $in_path"
+    fail_n=$((fail_n+1))
     rm -f "$tmp_path" 2>/dev/null || true
   fi
 done
