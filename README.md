@@ -2,7 +2,7 @@
 
 **Purpose**: WaxOn prepares raw recordings for editing by rendering a clean, DAW‑ready **24‑bit mono WAV** from any input. It applies a **DC block**, resamples to **44.1 kHz** or **48 kHz**, and finishes with a **true‑peak brickwall limiter** (user‑selectable ceiling: −1 to −6 dBFS). **No loudness normalization is performed in WaxOn.**
 
-> For final loudness to program standards and delivery formats (WAV/MP3), use **WaxOff**.
+> For final loudness to program standards and delivery formats (WAV/MP3), use [**WaxOff**](https://github.com/sevmorris/WaxOff).
 
 ---
 
